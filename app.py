@@ -7,7 +7,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from calculations import (
     compute_eboc, implied_multiples, build_pro_forma,
     compute_irr_and_returns, build_loan_amortization,
@@ -27,23 +26,31 @@ st.markdown("""
         background: linear-gradient(135deg, #1a1f2e 0%, #16192b 100%);
         border: 1px solid #2d3748;
         border-radius: 12px;
-        padding: 20px;
+        padding: 16px 12px;
         text-align: center;
         margin: 5px;
+        min-height: 110px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
     }
     .metric-card h3 {
         color: #8b95a5;
-        font-size: 0.85rem;
-        font-weight: 500;
-        margin-bottom: 5px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        margin-bottom: 8px;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
     .metric-card h2 {
         color: #e2e8f0;
-        font-size: 1.6rem;
+        font-size: 1.5rem;
         font-weight: 700;
         margin: 0;
+        white-space: nowrap;
     }
     .metric-card .positive { color: #48bb78; }
     .metric-card .negative { color: #fc8181; }
@@ -364,24 +371,30 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 with tab1:
     st.markdown('<div class="section-header">Purchase Price & Implied Multiples</div>', unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.markdown(metric_card("Purchase Price", fmt_dollar(purchase_price), "neutral"), unsafe_allow_html=True)
+        st.markdown(metric_card("Price", fmt_dollar(purchase_price), "neutral"), unsafe_allow_html=True)
     with c2:
-        st.markdown(metric_card("Revenue Multiple", f"{multiples['revenue_multiple']:.2f}x", "neutral"), unsafe_allow_html=True)
+        st.markdown(metric_card("Rev Multiple", f"{multiples['revenue_multiple']:.2f}x", "neutral"), unsafe_allow_html=True)
     with c3:
-        st.markdown(metric_card("AUM Multiple", f"{multiples['aum_multiple']:.2f}%", "neutral"), unsafe_allow_html=True)
+        st.markdown(metric_card("% of AUM", f"{multiples['aum_multiple']:.2f}%", "neutral"), unsafe_allow_html=True)
     with c4:
         st.markdown(metric_card("EBOC Multiple", f"{multiples['eboc_multiple']:.2f}x", "neutral"), unsafe_allow_html=True)
+    with c5:
+        price_per_client = purchase_price / num_clients if num_clients else 0
+        st.markdown(metric_card("Price / Client", fmt_dollar(price_per_client), "neutral"), unsafe_allow_html=True)
 
     st.markdown('<div class="section-header">EBOC Calculation</div>', unsafe_allow_html=True)
-    ec1, ec2, ec3 = st.columns(3)
+    ec1, ec2, ec3, ec4 = st.columns(4)
     with ec1:
         st.markdown(metric_card("EBITDA", fmt_dollar(ebitda), "neutral"), unsafe_allow_html=True)
     with ec2:
         st.markdown(metric_card("Owner Comp Adj.", fmt_dollar(owner_comp - 200_000), "neutral"), unsafe_allow_html=True)
     with ec3:
         st.markdown(metric_card("EBOC", fmt_dollar(eboc), "positive"), unsafe_allow_html=True)
+    with ec4:
+        margin = ebitda / annual_revenue if annual_revenue else 0
+        st.markdown(metric_card("EBITDA Margin", fmt_pct(margin), "positive" if margin > 0.3 else "neutral"), unsafe_allow_html=True)
 
     st.markdown('<div class="section-header">Deal Structure</div>', unsafe_allow_html=True)
 
@@ -417,7 +430,7 @@ with tab1:
         st.markdown(metric_card("5-Year IRR", fmt_pct(irr5), irr_class), unsafe_allow_html=True)
     with k2:
         coc5 = returns.get("coc_yr5", 0)
-        st.markdown(metric_card("5-Yr Cash-on-Cash", f"{coc5:.2f}x", "positive" if coc5 > 1 else "negative"), unsafe_allow_html=True)
+        st.markdown(metric_card("5-Yr Cash/Cash", f"{coc5:.2f}x", "positive" if coc5 > 1 else "negative"), unsafe_allow_html=True)
     with k3:
         st.markdown(metric_card("Breakeven Year", str(returns["breakeven_year"]), "neutral"), unsafe_allow_html=True)
     with k4:

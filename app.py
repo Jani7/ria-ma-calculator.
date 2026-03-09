@@ -172,22 +172,50 @@ def render_welcome_page():
         @media (max-width: 768px) {
             .feature-grid { grid-template-columns: repeat(2, 1fr); }
         }
+        @keyframes cardFadeUp {
+            from { opacity: 0; transform: translateY(18px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
         .feature-card {
             background: #1a1f2e;
             border: 1px solid #2d3748;
             border-radius: 8px;
             padding: 22px 18px;
-            transition: border-color 0.2s ease;
+            transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+            animation: cardFadeUp 0.5s ease both;
         }
+        .feature-card:nth-child(1) { animation-delay: 0.05s; }
+        .feature-card:nth-child(2) { animation-delay: 0.12s; }
+        .feature-card:nth-child(3) { animation-delay: 0.19s; }
+        .feature-card:nth-child(4) { animation-delay: 0.26s; }
+        .feature-card:nth-child(5) { animation-delay: 0.33s; }
+        .feature-card:nth-child(6) { animation-delay: 0.40s; }
         .feature-card:hover {
-            border-color: #4a90d9;
+            transform: translateY(-3px);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.3);
         }
+        .feature-card.fc-blue:hover   { border-color: #4a90d9; }
+        .feature-card.fc-green:hover  { border-color: #48bb78; }
+        .feature-card.fc-amber:hover  { border-color: #ed8936; }
+        .feature-card.fc-purple:hover { border-color: #9f7aea; }
+        .feature-card.fc-cyan:hover   { border-color: #63b3ed; }
+        .feature-card.fc-rose:hover   { border-color: #f687b3; }
         .feature-icon {
-            color: #4a90d9;
-            font-size: 1.2rem;
-            margin-bottom: 10px;
-            display: block;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.9rem;
+            margin-bottom: 12px;
         }
+        .fi-blue   { background: rgba(74,144,217,0.15); color: #4a90d9; }
+        .fi-green  { background: rgba(72,187,120,0.15); color: #48bb78; }
+        .fi-amber  { background: rgba(237,137,54,0.15); color: #ed8936; }
+        .fi-purple { background: rgba(159,122,234,0.15); color: #9f7aea; }
+        .fi-cyan   { background: rgba(99,179,237,0.15); color: #63b3ed; }
+        .fi-rose   { background: rgba(246,135,179,0.15); color: #f687b3; }
         .feature-card h3 {
             color: #e2e8f0;
             font-size: 0.88rem;
@@ -198,16 +226,6 @@ def render_welcome_page():
             color: #6b7280;
             font-size: 0.78rem;
             line-height: 1.5;
-            margin: 0;
-        }
-        .welcome-footer {
-            text-align: center;
-            padding-top: 20px;
-            border-top: 1px solid #1e2433;
-        }
-        .welcome-footer p {
-            color: #4a5568;
-            font-size: 0.75rem;
             margin: 0;
         }
     </style>
@@ -224,39 +242,36 @@ def render_welcome_page():
             </p>
         </div>
         <div class="feature-grid">
-            <div class="feature-card">
-                <span class="feature-icon">&#9670;</span>
+            <div class="feature-card fc-blue">
+                <div class="feature-icon fi-blue">&#9670;</div>
                 <h3>Deal Structuring</h3>
                 <p>Model upfront cash, seller notes, earnouts, and equity rollover splits</p>
             </div>
-            <div class="feature-card">
-                <span class="feature-icon">&#9638;</span>
+            <div class="feature-card fc-green">
+                <div class="feature-icon fi-green">&#9638;</div>
                 <h3>Pro Forma Analysis</h3>
                 <p>5-year P&L with revenue growth, attrition, and cost synergies</p>
             </div>
-            <div class="feature-card">
-                <span class="feature-icon">&#9686;</span>
+            <div class="feature-card fc-amber">
+                <div class="feature-icon fi-amber">&#9686;</div>
                 <h3>Return Metrics</h3>
                 <p>IRR, cash-on-cash, breakeven analysis, and DSCR tracking</p>
             </div>
-            <div class="feature-card">
-                <span class="feature-icon">&#9649;</span>
+            <div class="feature-card fc-purple">
+                <div class="feature-icon fi-purple">&#9649;</div>
                 <h3>Sensitivity Tables</h3>
                 <p>Two-way heatmaps across multiples, growth, and attrition scenarios</p>
             </div>
-            <div class="feature-card">
-                <span class="feature-icon">&#9655;</span>
+            <div class="feature-card fc-cyan">
+                <div class="feature-icon fi-cyan">&#9655;</div>
                 <h3>Earnout Modeling</h3>
                 <p>Floor, cap, cliff vesting, and multi-metric performance thresholds</p>
             </div>
-            <div class="feature-card">
-                <span class="feature-icon">&#9744;</span>
+            <div class="feature-card fc-rose">
+                <div class="feature-icon fi-rose">&#9744;</div>
                 <h3>Debt Analysis</h3>
                 <p>Amortization schedules with I/O periods, balloon payments, and standstill terms</p>
             </div>
-        </div>
-        <div class="welcome-footer">
-            <p>Built for wealth management and investment banking professionals</p>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -269,153 +284,307 @@ def render_welcome_page():
 
 
 def render_instructions_tab():
-    """Render the instructions/help tab content."""
+    """Render the instructions/help tab with navigation guide and scenarios."""
     st.markdown("""
     <style>
-        .instructions-section {
+        .guide-card {
             background: #1a1f2e;
             border: 1px solid #2d3748;
             border-radius: 8px;
             padding: 24px;
-            margin-bottom: 20px;
+            margin-bottom: 16px;
         }
-        .instructions-section h3 {
+        .guide-card h3 {
             color: #e2e8f0;
             font-size: 1rem;
             font-weight: 600;
-            margin-bottom: 12px;
+            margin-bottom: 14px;
             padding-bottom: 8px;
             border-bottom: 1px solid #2d3748;
         }
-        .instructions-section p, .instructions-section li {
+        .guide-card p, .guide-card li {
             color: #a0aec0;
-            font-size: 0.88rem;
+            font-size: 0.86rem;
             line-height: 1.7;
         }
-        .instructions-section code {
+        .guide-card strong { color: #e2e8f0; }
+        .guide-card code {
             background: #0e1117;
             color: #4a90d9;
             padding: 2px 6px;
             border-radius: 3px;
-            font-size: 0.82rem;
+            font-size: 0.8rem;
         }
-        .step-number {
-            display: inline-block;
-            width: 24px;
-            height: 24px;
+        .step-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+        .step-num {
+            flex-shrink: 0;
+            width: 28px;
+            height: 28px;
             background: #4a90d9;
             color: #0e1117;
             border-radius: 50%;
-            text-align: center;
-            line-height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             font-weight: 700;
-            font-size: 0.75rem;
-            margin-right: 8px;
+            font-size: 0.8rem;
+            margin-top: 2px;
+        }
+        .step-content { flex: 1; }
+        .step-content strong { color: #e2e8f0; }
+        .step-content p {
+            color: #a0aec0;
+            font-size: 0.86rem;
+            line-height: 1.6;
+            margin: 0;
+        }
+        .scenario-box {
+            background: linear-gradient(135deg, #1a1f2e 0%, #16192b 100%);
+            border-radius: 8px;
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+        .scenario-box h4 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+        .scenario-blue h4 { color: #4a90d9; border-left: 3px solid #4a90d9; padding-left: 12px; }
+        .scenario-green h4 { color: #48bb78; border-left: 3px solid #48bb78; padding-left: 12px; }
+        .scenario-box table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 14px;
+        }
+        .scenario-box th {
+            text-align: left;
+            color: #8b95a5;
+            font-size: 0.72rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 6px 10px;
+            border-bottom: 1px solid #2d3748;
+        }
+        .scenario-box td {
+            color: #e2e8f0;
+            font-size: 0.84rem;
+            padding: 6px 10px;
+            border-bottom: 1px solid rgba(45,55,72,0.5);
+        }
+        .scenario-box .note {
+            color: #8b95a5;
+            font-size: 0.78rem;
+            font-style: italic;
+            line-height: 1.6;
+            margin-top: 8px;
+        }
+        .nav-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-top: 12px;
+        }
+        @media (max-width: 768px) {
+            .nav-grid { grid-template-columns: 1fr; }
+        }
+        .nav-item {
+            background: #0e1117;
+            border: 1px solid #2d3748;
+            border-radius: 6px;
+            padding: 14px 16px;
+        }
+        .nav-item strong {
+            color: #e2e8f0;
+            font-size: 0.84rem;
+            display: block;
+            margin-bottom: 4px;
+        }
+        .nav-item span {
+            color: #6b7280;
+            font-size: 0.76rem;
+            line-height: 1.5;
         }
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div class="section-header">How to Use the Calculator</div>',
-                unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Getting Started</div>', unsafe_allow_html=True)
 
     st.markdown("""
-    <div class="instructions-section">
-        <h3>Quick Start</h3>
-        <p>
-            <span class="step-number">1</span>
-            Enter the <strong>Target Firm</strong> details in the sidebar &mdash; AUM, revenue,
-            EBITDA, and owner&rsquo;s compensation are the key inputs.<br><br>
-            <span class="step-number">2</span>
-            Set your <strong>Deal Terms</strong> &mdash; choose a purchase price (or let it
-            calculate from a revenue multiple) and split the consideration across
-            upfront cash, seller note, earnout, and equity rollover.<br><br>
-            <span class="step-number">3</span>
-            Configure <strong>Financing</strong> &mdash; specify how much of the upfront cash
-            is self-funded vs. financed, plus loan terms.<br><br>
-            <span class="step-number">4</span>
-            Review the five analysis tabs to evaluate the deal from different angles.
+    <div class="guide-card">
+        <h3>How to Navigate the Calculator</h3>
+        <div class="step-row">
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <p><strong>Sidebar (left panel)</strong> is where all inputs live. Start with
+                <strong>Target Firm</strong> at the top &mdash; enter the AUM, revenue, EBITDA,
+                and owner comp of the RIA you&rsquo;re evaluating. Scroll down through
+                Deal Terms, Financing, and other sections.</p>
+            </div>
+        </div>
+        <div class="step-row">
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <p><strong>Deal Terms</strong> controls structure. You can either enter
+                a purchase price directly or pick a revenue multiple and let the calculator
+                derive the price. Then allocate the consideration: upfront cash, seller note,
+                earnout, and equity rollover should add up to 100%.</p>
+            </div>
+        </div>
+        <div class="step-row">
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <p><strong>Everything updates live.</strong> As you change any input in the sidebar,
+                the five analysis tabs on the right recalculate instantly. There&rsquo;s no
+                submit button &mdash; just adjust the inputs and watch the outputs change.</p>
+            </div>
+        </div>
+        <div class="step-row">
+            <div class="step-num">4</div>
+            <div class="step-content">
+                <p><strong>Work through the tabs left to right.</strong> Start with
+                Deal Summary for headline numbers, then dig into Pro Forma for the P&amp;L,
+                Sensitivity for stress testing, Earnout for seller economics,
+                and Debt for amortization and DSCR.</p>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="guide-card">
+        <h3>What Each Tab Shows You</h3>
+        <div class="nav-grid">
+            <div class="nav-item">
+                <strong>Deal Summary</strong>
+                <span>Purchase price multiples (revenue, AUM, EBOC), deal structure
+                waterfall chart, IRR, cash-on-cash, breakeven year, DSCR</span>
+            </div>
+            <div class="nav-item">
+                <strong>Pro Forma Financials</strong>
+                <span>5-year P&amp;L table with revenue, expenses, debt service, net cash flow.
+                Combined entity view if buyer profile is enabled.</span>
+            </div>
+            <div class="nav-item">
+                <strong>Sensitivity Analysis</strong>
+                <span>Two heatmaps &mdash; IRR by multiple vs. attrition, and breakeven
+                by growth vs. multiple. Use these to find where the deal breaks.</span>
+            </div>
+            <div class="nav-item">
+                <strong>Earnout &amp; Seller Economics</strong>
+                <span>Earnout payouts under 3 scenarios, cumulative seller proceeds timeline,
+                and seller note amortization schedule.</span>
+            </div>
+            <div class="nav-item">
+                <strong>Debt Analysis</strong>
+                <span>Full loan amortization, principal vs. interest breakdown, and DSCR
+                by year with 1.25x lender threshold marked.</span>
+            </div>
+            <div class="nav-item">
+                <strong>PDF Export (bottom of page)</strong>
+                <span>Scroll past the tabs to the footer. Click &ldquo;Export Full Analysis
+                to PDF&rdquo; to download a complete report.</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # -- Scenario walkthroughs ---
+    st.markdown('<div class="section-header">Example Scenarios</div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="scenario-box scenario-blue">
+        <h4>Scenario A &mdash; Large Platform Acquiring a $1B RIA</h4>
+        <table>
+            <tr><th>Input</th><th>Value</th><th>Rationale</th></tr>
+            <tr><td>Target AUM</td><td>$1,000,000,000</td><td>Mid-size RIA with institutional book</td></tr>
+            <tr><td>Revenue</td><td>$7,500,000</td><td>~75 bps on AUM (fee-based)</td></tr>
+            <tr><td>EBITDA</td><td>$3,000,000</td><td>40% margin, well-run practice</td></tr>
+            <tr><td>Owner Comp</td><td>$750,000</td><td>Founder takes above-market salary</td></tr>
+            <tr><td>Clients</td><td>350</td><td>HNW-focused, avg $2.9M per household</td></tr>
+            <tr><td>Growth Rate</td><td>6%</td><td>Organic + market appreciation</td></tr>
+            <tr><td>Attrition</td><td>4%</td><td>Low &mdash; sticky client base</td></tr>
+            <tr><td>Purchase Price</td><td>$18,000,000</td><td>~2.4x revenue, in-line for quality book</td></tr>
+            <tr><td>Structure</td><td>60 / 20 / 15 / 5</td><td>Cash / Note / Earnout / Rollover</td></tr>
+            <tr><td>Financing</td><td>50% self-funded</td><td>$5.4M loan at 6.5% over 7 years</td></tr>
+            <tr><td>Integration</td><td>$200K one-time</td><td>Tech migration, compliance transfer</td></tr>
+        </table>
+        <p class="note">
+            <strong>What to look for:</strong> Check Deal Summary for the implied EBOC multiple
+            (should be under 5x for a quality deal). Go to Sensitivity Analysis and see how
+            IRR holds up if attrition spikes to 8-10% in the first two years &mdash; this is the
+            key risk in platform acquisitions where the founder is departing. The Earnout tab
+            shows what the seller actually receives under different retention outcomes.
         </p>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown("""
-    <div class="instructions-section">
-        <h3>Sidebar Input Sections</h3>
-        <p><strong>Target Firm</strong> &mdash; Financial profile of the RIA being acquired.
-        AUM and revenue drive valuations; EBITDA and owner comp determine EBOC
-        (Earnings Before Owner&rsquo;s Compensation), which adds back the excess owner
-        salary above a $200K market replacement cost.</p>
-
-        <p><strong>Deal Terms</strong> &mdash; Structure the purchase consideration. The four
-        components (upfront cash, seller note, earnout, equity rollover) should
-        sum to 100%. The calculator will warn you if they don&rsquo;t.</p>
-
-        <p><strong>Seller Note Terms</strong> &mdash; Configure the deferred purchase price
-        component. Standstill periods defer principal payments; PIK accrual
-        adds unpaid interest to the balance.</p>
-
-        <p><strong>Earnout Terms</strong> &mdash; Performance-based contingent payments.
-        Choose the metric (revenue, AUM, or client retention), set floor/cap
-        percentages, and select annual or cliff vesting.</p>
-
-        <p><strong>Financing</strong> &mdash; Bank or SBA loan terms for the debt-financed
-        portion of upfront cash. Advanced options include interest-only periods
-        and balloon payments.</p>
-
-        <p><strong>Seller Transition Terms</strong> &mdash; Post-close consulting agreements
-        and non-compete payments. These are buyer expenses that reduce cash flow
-        but also appear in the seller&rsquo;s total proceeds.</p>
-
-        <p><strong>Integration</strong> &mdash; One-time costs (tech migration, rebranding)
-        and ongoing synergies (cost savings from combining operations).</p>
-
-        <p><strong>Tax Impact</strong> &mdash; Applies your marginal tax rate to interest
-        deductions for an after-tax cash flow view.</p>
-
-        <p><strong>Buyer Profile</strong> &mdash; Optional. Enables a combined entity view
-        showing what the merged firm looks like.</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class="instructions-section">
-        <h3>Analysis Tabs</h3>
-        <p><strong>Deal Summary</strong> &mdash; Implied purchase multiples (revenue, AUM %,
-        EBOC), deal structure waterfall chart, and headline return metrics
-        (5-year IRR, cash-on-cash, breakeven year, Year 1 DSCR).</p>
-
-        <p><strong>Pro Forma Financials</strong> &mdash; Year-by-year P&L showing revenue
-        (with growth and attrition), expenses, debt service, and net cash flow.
-        The trajectory chart visualizes the 5-year outlook.</p>
-
-        <p><strong>Sensitivity Analysis</strong> &mdash; Two heatmaps: (1) IRR by revenue
-        multiple vs. client attrition rate, (2) Breakeven year by growth rate
-        vs. revenue multiple. Use these to stress-test assumptions.</p>
-
-        <p><strong>Earnout &amp; Seller Economics</strong> &mdash; Three scenarios (base, upside,
-        downside) for earnout payouts. Cumulative seller proceeds timeline
-        shows total value received across all consideration components.</p>
-
-        <p><strong>Debt Analysis</strong> &mdash; Full loan amortization schedule,
-        principal vs. interest breakdown chart, and DSCR by year with a 1.25x
-        target threshold.</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class="instructions-section">
-        <h3>Key Formulas &amp; Assumptions</h3>
-        <p>
-            <code>EBOC = EBITDA + (Owner Comp - $200K)</code> &mdash; Earnings Before
-            Owner&rsquo;s Compensation normalizes the seller&rsquo;s excess salary.<br><br>
-            <code>DSCR = EBITDA / Total Debt Service</code> &mdash; Lenders typically
-            require 1.25x minimum coverage.<br><br>
-            <code>IRR</code> &mdash; Computed with a 6x EBITDA terminal value at each
-            horizon (year 3, 5, 7).<br><br>
-            <strong>Client attrition</strong> is applied to years 1&ndash;2 only, assuming
-            retention stabilizes by year 3 post-close.<br><br>
-            <strong>Expense inflation</strong> is assumed at 2% annually.
+    <div class="scenario-box scenario-green">
+        <h4>Scenario B &mdash; $10B Wealth Platform Acquiring a $500M RIA</h4>
+        <table>
+            <tr><th>Input</th><th>Value</th><th>Rationale</th></tr>
+            <tr><td>Target AUM</td><td>$500,000,000</td><td>Smaller practice, lifestyle RIA</td></tr>
+            <tr><td>Revenue</td><td>$4,000,000</td><td>~80 bps blended fee schedule</td></tr>
+            <tr><td>EBITDA</td><td>$1,400,000</td><td>35% margin, lean team</td></tr>
+            <tr><td>Owner Comp</td><td>$500,000</td><td>Close to market rate already</td></tr>
+            <tr><td>Clients</td><td>150</td><td>Avg $3.3M per client, concentrated book</td></tr>
+            <tr><td>Growth Rate</td><td>4%</td><td>Modest &mdash; mature practice</td></tr>
+            <tr><td>Attrition</td><td>7%</td><td>Higher risk &mdash; personal relationship-driven</td></tr>
+            <tr><td>Purchase Price</td><td>$8,000,000</td><td>2.0x revenue (standard tuck-in)</td></tr>
+            <tr><td>Structure</td><td>50 / 25 / 20 / 5</td><td>More deferred &mdash; heavier note + earnout</td></tr>
+            <tr><td>Financing</td><td>40% self-funded</td><td>$2.4M loan at 7% over 5 years</td></tr>
+            <tr><td>Seller Note</td><td>5% rate, 5-yr term</td><td>1-year standstill with interest-only</td></tr>
+            <tr><td>Earnout</td><td>Revenue retention, 0% floor, 125% cap</td><td>3-year earnout, annual vesting</td></tr>
+            <tr><td>Consulting</td><td>$150K/yr for 2 years</td><td>Transition advisory</td></tr>
+            <tr><td>Non-Compete</td><td>$100K over 3 years</td><td>Standard geographic restriction</td></tr>
+        </table>
+        <p class="note">
+            <strong>What to look for:</strong> This is a riskier deal with higher attrition and
+            a concentrated book. In the Pro Forma tab, watch Year 1-2 net cash flow &mdash;
+            it may go negative with consulting costs and integration drag. The Debt tab
+            will show whether DSCR stays above 1.25x. Check if the seller note standstill
+            helps early-year cash flow. In Sensitivity, stress test the 7% attrition up
+            to 12% &mdash; with only 150 clients, losing a few large households can materially
+            change the outcome. Enable the combined entity view in Buyer Profile to see the
+            post-acquisition $10.5B platform picture.
         </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Key assumptions reference
+    st.markdown('<div class="section-header">Key Assumptions</div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="guide-card">
+        <h3>How the Model Works</h3>
+        <div class="nav-grid">
+            <div class="nav-item">
+                <strong>EBOC = EBITDA + (Owner Comp &minus; $200K)</strong>
+                <span>Normalizes for the seller&rsquo;s excess comp above market replacement.
+                Used as the primary earnings metric for pricing.</span>
+            </div>
+            <div class="nav-item">
+                <strong>IRR uses 6x EBITDA terminal value</strong>
+                <span>Computed at year 3, 5, and 7 horizons. Assumes a future sale
+                at a 6x multiple of that year&rsquo;s EBITDA.</span>
+            </div>
+            <div class="nav-item">
+                <strong>Client attrition in years 1&ndash;2 only</strong>
+                <span>Post-acquisition churn typically peaks in the first two years,
+                then stabilizes as clients settle with the new team.</span>
+            </div>
+            <div class="nav-item">
+                <strong>DSCR = EBITDA / Total Debt Service</strong>
+                <span>Lenders typically require 1.25x minimum. The calculator
+                tracks this each year against both loan and note payments.</span>
+            </div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -446,13 +615,7 @@ if not st.session_state.show_calculator:
 # ==============================================================================
 # SIDEBAR -- Inputs
 # ==============================================================================
-_sb_title, _sb_home = st.sidebar.columns([3, 1])
-with _sb_title:
-    st.markdown("## RIA M&A Calculator")
-with _sb_home:
-    if st.button("Home", key="back_home"):
-        st.session_state.show_calculator = False
-        st.rerun()
+st.sidebar.markdown("## RIA M&A Calculator")
 st.sidebar.markdown("---")
 
 # -- Target Firm ---------------------------------------------------------------
@@ -668,8 +831,15 @@ seller_proceeds = compute_seller_total_proceeds(
 # ==============================================================================
 # MAIN PANEL
 # ==============================================================================
-st.markdown("# RIA M&A Calculator")
-st.markdown("*Buyer-side acquisition economics for Registered Investment Advisors*")
+_hdr_left, _hdr_right = st.columns([5, 1])
+with _hdr_left:
+    st.markdown("# RIA M&A Calculator")
+    st.markdown("*Buyer-side acquisition economics for Registered Investment Advisors*")
+with _hdr_right:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("Home", key="back_home", use_container_width=True):
+        st.session_state.show_calculator = False
+        st.rerun()
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Deal Summary", "Pro Forma Financials", "Sensitivity Analysis",

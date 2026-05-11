@@ -2022,8 +2022,10 @@ with tab1:
     # Two clean lines: methodology + factor breakdown + verdict. Avoiding
     # inline bold mid-sentence keeps the typography consistent with the
     # rest of the Streamlit captions on the page.
-    _adj = fmt_dollar(valuation['adj_ebitda'])
-    _repl = fmt_dollar(valuation['replacement_cost'])
+    # Escape $ signs so Streamlit's markdown doesn't treat them as MathJax
+    # delimiters and render the surrounded text in italic math font.
+    _adj = fmt_dollar(valuation['adj_ebitda']).replace("$", r"\$")
+    _repl = fmt_dollar(valuation['replacement_cost']).replace("$", r"\$")
     st.caption(
         f"Multiple: {valuation['final_multiple']:.1f}× adjusted EBITDA "
         f"(base 7.0× × stacked multipliers). "
@@ -2072,8 +2074,11 @@ with tab1:
         st.markdown(metric_card("Earnout", fmt_pct(sd['earnout']), "neutral"), unsafe_allow_html=True)
     with sd4:
         st.markdown(metric_card("Equity Rollover", fmt_pct(sd['rollover']), "neutral"), unsafe_allow_html=True)
+    # Escape $ in the rationale strings so $200M / $1B references don't
+    # trigger MathJax italics.
+    _rationale_safe = sd['rationale'].replace("$", r"\$")
     st.caption(
-        f"Profile: **{sd['profile'].replace('_', ' ').title()}**. {sd['rationale']} "
+        f"Profile: **{sd['profile'].replace('_', ' ').title()}**. {_rationale_safe} "
         f"Recommended note rate {sd['note_rate']*100:.1f}% over {sd['note_term']} years, "
         f"{sd['earnout_period']}-year earnout capped at {sd['earnout_cap_pct']}%, "
         f"{sd['standstill_years']}-year note standstill if bank-financed."

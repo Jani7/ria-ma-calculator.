@@ -109,12 +109,11 @@ def _resolve_adv() -> dict:
         with urllib.request.urlopen(req, timeout=60) as resp:
             body = resp.read()
         _ADV_CACHE_PATH.write_bytes(body)
-        n = len(body)
-        # Parquet files start with the 4-byte "PAR1" magic and end with it.
-        is_parquet = n > 8 and body[:4] == b"PAR1" and body[-4:] == b"PAR1"
-        if not is_parquet:
-            return {"path": None, "status": f"fetched_not_parquet_{n}b"}
-        return {"path": _ADV_CACHE_PATH, "status": f"fetched_{n}b"}
+        # Verify we got a real parquet, not an HTML error page or JSON wrapper.
+        # Parquet starts and ends with the 4-byte "PAR1" magic.
+        if not (len(body) > 8 and body[:4] == b"PAR1" and body[-4:] == b"PAR1"):
+            return {"path": None, "status": "bad_response"}
+        return {"path": _ADV_CACHE_PATH, "status": "fetched"}
     except urllib.error.HTTPError as e:
         # Record only the HTTP status — no body, no headers, no URL.
         return {"path": None, "status": f"http_{e.code}"}
@@ -826,32 +825,18 @@ if _query_clean and len(_query_clean) < 3:
 elif _query_clean:
     _adv_df = _load_adv_df()
     if _adv_df.empty:
-        # Surface the resolution status from _resolve_adv() so we can debug
-        # remote setup issues without revealing the PAT.
-        _status = _adv_resolution_status()
-        # If the resolve says success but the df is empty, the issue is in
-        # the load/cache layer. Tack that on so we don't chase the wrong leg.
-        if _status in ("local", "cache") or _status.startswith("fetched_"):
-            _status = f"{_status}_but_empty_df"
+        # Show why so a future operator can act on the actual failure mode.
+        # Status codes are PAT-safe (no token, URL, or exception text in them).
         _status_msg = {
-            "no_token": "`ADV_DATA_TOKEN` secret is not set on Streamlit Cloud.",
-            "http_401": "GitHub returned 401 — PAT is invalid or expired.",
-            "http_403": "GitHub returned 403 — PAT lacks Contents:read on `Jani7/ria-ma-data`.",
-            "http_404": "GitHub returned 404 — repo/file/branch not found (check `ADV_DATA_REPO`/`PATH`/`REF`).",
-            "network_error": "Could not reach api.github.com from the app.",
-            "io_error": "Could not write `/tmp` cache (filesystem issue).",
-        }.get(_status)
-        if _status_msg is None:
-            if _status.startswith("fetched_not_parquet_"):
-                _status_msg = f"GitHub returned a non-parquet body ({_status.removeprefix('fetched_not_parquet_')}) — Accept header or response shape wrong."
-            elif _status.startswith("fetched_") and _status.endswith("b"):
-                _status_msg = f"Fetch succeeded ({_status}) but the DataFrame loaded empty — possible parquet read error."
-            else:
-                _status_msg = f"Status: `{_status}`."
-        st.sidebar.caption(
-            f"⚠ SEC data unavailable. {_status_msg} "
-            "(Dev: run `scripts/build_adv_data.py` for a local file.)"
-        )
+            "no_token": "`ADV_DATA_TOKEN` secret not set on Streamlit Cloud.",
+            "http_401": "PAT is invalid or expired.",
+            "http_403": "PAT lacks Contents:read on the data repo.",
+            "http_404": "Data repo/file/branch not found.",
+            "bad_response": "Data source returned a non-parquet body.",
+            "network_error": "Couldn't reach api.github.com.",
+            "io_error": "Couldn't write the local cache.",
+        }.get(_adv_resolution_status(), "Data source check failed.")
+        st.sidebar.caption(f"⚠ SEC data unavailable — {_status_msg}")
     else:
         _matches = sec_lookup.search_firms(_query_clean, _adv_df, limit=5)
         if _matches:

@@ -159,7 +159,23 @@ if "theme" not in st.session_state:
 
 _DARK_CSS = """
 <style>
-    .stApp { background-color: #0e1117; }
+    /* Streamlit's default light theme leaks through if we only style our
+       custom classes — override the CSS variables and key chrome here. */
+    :root, .stApp, [data-theme] {
+        --primary-color: #4a90d9 !important;
+        --background-color: #0e1117 !important;
+        --secondary-background-color: #131722 !important;
+        --text-color: #e2e8f0 !important;
+    }
+    .stApp { background-color: #0e1117 !important; color: #e2e8f0 !important; }
+    section[data-testid="stSidebar"],
+    div[data-testid="stSidebar"],
+    div[data-testid="stSidebar"] > div {
+        background-color: #131722 !important;
+        color: #e2e8f0 !important;
+    }
+    div[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+    div[data-testid="stSidebar"] a { color: #63b3ed !important; }
     .metric-card {
         background: linear-gradient(135deg, #1a1f2e 0%, #16192b 100%);
         border: 1px solid #2d3748;

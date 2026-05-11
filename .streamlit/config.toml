@@ -1,9 +1,6 @@
-[theme]
-primaryColor = "#4a90d9"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#131722"
-textColor = "#e2e8f0"
-font = "sans serif"
+# Theme is owned by app.py (st.session_state["theme"] + injected CSS) so
+# users can toggle dark/light at runtime. Setting a [theme] block here
+# would override our injected CSS via Streamlit's runtime variables.
 
 [server]
 headless = true

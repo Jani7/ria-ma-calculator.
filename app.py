@@ -11,6 +11,7 @@ from calculations import (
     compute_eboc, implied_multiples, build_pro_forma,
     compute_irr_and_returns, build_loan_amortization,
     build_seller_note_amortization, compute_dscr,
+    compute_valuation_band, auto_replacement_cost,
     compute_earnout_scenarios, compute_seller_total_proceeds,
     sensitivity_irr, sensitivity_breakeven,
 )
@@ -1768,8 +1769,22 @@ buyer_margin = st.sidebar.slider("Buyer's EBITDA Margin (%)", 0, 60, 35, 5) / 10
 # ==============================================================================
 # CALCULATIONS
 # ==============================================================================
-eboc = compute_eboc(ebitda, owner_comp)
+# Replacement cost auto-scales with AUM: $200K for sub-$200M, $400K for
+# $200M-$1B, $600K+ for $1B+. The flat $200K constant was systematically
+# inflating EBOC for mid-size and large firms and depressing their EBOC
+# multiple.
+replacement_cost = auto_replacement_cost(aum)
+eboc = compute_eboc(ebitda, owner_comp, replacement_cost=replacement_cost)
 multiples = implied_multiples(purchase_price, annual_revenue, aum, eboc)
+
+# Multi-factor valuation band — answers "what is this firm worth?" before
+# the user has to pick a price. Mid value is base 7.0× EBITDA × stacked
+# multipliers (recurring, size, growth, margin, book/geo/key-person).
+valuation = compute_valuation_band(
+    revenue=annual_revenue, ebitda=ebitda, owner_comp=owner_comp,
+    aum=aum, pct_recurring=pct_recurring, growth_rate=rev_growth,
+    replacement_cost=replacement_cost,
+)
 
 pro_forma = build_pro_forma(
     revenue=annual_revenue, ebitda=ebitda, owner_comp=owner_comp,
@@ -1788,11 +1803,28 @@ pro_forma = build_pro_forma(
     consulting_annual=consulting_annual, consulting_years=consulting_years,
     noncompete_total=noncompete_total, noncompete_years=noncompete_years,
     tax_rate=tax_rate,
+    replacement_cost=replacement_cost,
+)
+
+# Build schedules separately so they can be passed into compute_irr_and_returns
+# for the terminal-value debt subtraction. Without this, a 60%-leverage Y5
+# exit shows IRR as if all the debt magically disappeared at closing.
+_debt_amount = purchase_price * pct_upfront_cash * (1 - pct_self_funded)
+_loan_sched_for_irr = build_loan_amortization(
+    _debt_amount, loan_rate, loan_term,
+    io_years=loan_io_years, balloon=loan_balloon, amort_years=loan_amort_years,
+)
+_note_sched_for_irr = build_seller_note_amortization(
+    purchase_price * pct_seller_note, note_rate, note_term,
+    standstill_years=note_standstill, io_during_standstill=note_io_standstill,
 )
 
 returns = compute_irr_and_returns(
     pro_forma, purchase_price, pct_upfront_cash, pct_self_funded, pct_equity_rollover,
     pct_recurring=pct_recurring,
+    loan_schedule=_loan_sched_for_irr,
+    note_schedule=_note_sched_for_irr,
+    pct_seller_note=pct_seller_note,
 )
 
 dscr = compute_dscr(pro_forma)
@@ -1891,6 +1923,41 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 # TAB 1 -- Deal Summary
 # ==============================================================================
 with tab1:
+    # ---- Valuation Band (banker-MD memo, Part B) ----
+    # The headline answer to "what is this firm worth?" — a defensible
+    # range built from a multi-factor model the user can stress-test, NOT
+    # a single price the user has to guess at.
+    st.markdown('<div class="section-header">Estimated Valuation</div>', unsafe_allow_html=True)
+    vb1, vb2, vb3 = st.columns(3)
+    with vb1:
+        st.markdown(metric_card("Low", fmt_dollar(valuation["low"]), "neutral"), unsafe_allow_html=True)
+    with vb2:
+        st.markdown(metric_card("Mid", fmt_dollar(valuation["mid"]), "accent"), unsafe_allow_html=True)
+    with vb3:
+        st.markdown(metric_card("High", fmt_dollar(valuation["high"]), "neutral"), unsafe_allow_html=True)
+    _f = valuation["factors"]
+    st.caption(
+        f"**{valuation['final_multiple']:.1f}× adj. EBITDA** "
+        f"(base 7.0× × multipliers: recurring {_f['recurring']:.2f} · "
+        f"size {_f['size']:.2f} · growth {_f['growth']:.2f} · margin {_f['margin']:.2f}). "
+        f"Adjusted EBITDA: {fmt_dollar(valuation['adj_ebitda'])} "
+        f"(EBITDA + Owner Comp − {fmt_dollar(valuation['replacement_cost'])} replacement). "
+        f"Band ±{valuation['band_width']*100:.0f}%. "
+        f"Your entered price ({fmt_dollar(purchase_price)}) "
+        + ("is **in band**." if valuation["low"] <= purchase_price <= valuation["high"]
+           else ("is **below band** — possible bargain or hidden risk."
+                 if purchase_price < valuation["low"]
+                 else "is **above band** — verify upside drivers or expect margin compression."))
+    )
+    if aum > 10e9:
+        st.caption(
+            "*Mega-RIA caveat: at $10B+ AUM, valuations are bespoke and driven by "
+            "enterprise dynamics (PE rolls, equity stakes, sum-of-the-parts). Recent "
+            "aggregator transactions priced at 16-22× EBITDA — see Hellman & Friedman / "
+            "Edelman, Stone Point / Mariner, GTCR / Captrust for precedent. Band above "
+            "should be read directionally only.*"
+        )
+
     st.markdown('<div class="section-header">Purchase Price & Implied Multiples</div>', unsafe_allow_html=True)
 
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -1913,7 +1980,9 @@ with tab1:
     with ec1:
         st.markdown(metric_card("EBITDA", fmt_dollar(ebitda), "neutral"), unsafe_allow_html=True)
     with ec2:
-        st.markdown(metric_card("Owner Comp Adj.", fmt_dollar(owner_comp - 200_000), "neutral"), unsafe_allow_html=True)
+        # Owner Comp Adj uses the AUM-scaled replacement cost, not the flat
+        # $200K constant — otherwise EBOC display disagrees with the engine.
+        st.markdown(metric_card("Owner Comp Adj.", fmt_dollar(owner_comp - replacement_cost), "neutral"), unsafe_allow_html=True)
     with ec3:
         st.markdown(metric_card("EBOC", fmt_dollar(eboc), "positive"), unsafe_allow_html=True)
     with ec4:

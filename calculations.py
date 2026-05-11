@@ -14,9 +14,125 @@ MARKET_REPLACEMENT_COST = 200_000  # Default market replacement cost for owner
 STEADY_STATE_ATTRITION_FRACTION = 0.4
 
 
+def auto_replacement_cost(aum: float) -> int:
+    """Default replacement cost for a departing owner, scaled by firm size.
+
+    The hardcoded $200K constant was systematically too low: a $500M-AUM
+    firm replaces the owner with a $400-600K loaded-cost senior advisor,
+    not a $200K hire. Using $200K across the board inflated EBOC and
+    depressed the EBOC multiple, making every default deal look cheaper
+    than it actually was.
+    """
+    if aum < 200_000_000:
+        return 200_000
+    if aum < 1_000_000_000:
+        return 400_000
+    return 600_000
+
+
 def compute_eboc(ebitda: float, owner_comp: float, replacement_cost: float = MARKET_REPLACEMENT_COST) -> float:
     """EBOC = EBITDA + (Owner's Comp - Market Replacement Cost)."""
     return ebitda + (owner_comp - replacement_cost)
+
+
+def compute_valuation_band(
+    revenue: float,
+    ebitda: float,
+    owner_comp: float,
+    aum: float,
+    pct_recurring: float,
+    growth_rate: float,
+    replacement_cost: float = None,
+    # Qualitative scores — default to neutral 1.00 when the UI doesn't
+    # collect them yet. Each is bounded by the banker-memo ranges below.
+    book_quality_score: float = 1.00,   # 0.90 (high concentration / aged) → 1.05 (clean)
+    geography_score: float = 1.00,      # 0.95 (rural) → 1.05 (wealth-belt)
+    key_person_score: float = 1.00,     # 0.80 (50%+ owner-dependent) → 1.05 (institutionalized)
+) -> dict:
+    """Multi-factor EBITDA-multiple valuation band.
+
+    Replaces the user-enters-price-then-computes-multiples workflow with
+    a defensible band the buyer can stress-test. Base multiple is the
+    2025-26 market median for $250M-$1B AUM RIA transactions (Echelon
+    Q1 2026 deal book ≈ 8.1× adjusted EBITDA — we anchor slightly lower
+    at 7.0× and let the multipliers earn their way up).
+
+    Returns:
+        dict with low / mid / high dollar values, the implied EBITDA
+        multiple, the adjusted EBITDA used, and each factor's contribution
+        so the UI can show "here's why we got this number."
+    """
+    if replacement_cost is None:
+        replacement_cost = auto_replacement_cost(aum)
+    adj_ebitda = max(0.0, ebitda + (owner_comp - replacement_cost))
+
+    def _recurring_factor(p):
+        # 50% → 0.85, 80% → 1.00, 95%+ → 1.15. Smooth piecewise.
+        p = max(50.0, min(100.0, p))
+        if p <= 80.0:
+            return 0.85 + (p - 50.0) / 30.0 * (1.00 - 0.85)
+        return 1.00 + (p - 80.0) / 15.0 * (1.15 - 1.00)
+
+    def _size_factor(a):
+        # <$200M → 0.85, $500M → 1.00, $1B → 1.10, $2B+ → 1.20.
+        if a < 200_000_000: return 0.85
+        if a < 500_000_000: return 0.85 + (a - 200_000_000) / 300_000_000 * (1.00 - 0.85)
+        if a < 1_000_000_000: return 1.00 + (a - 500_000_000) / 500_000_000 * (1.10 - 1.00)
+        if a < 2_000_000_000: return 1.10 + (a - 1_000_000_000) / 1_000_000_000 * (1.20 - 1.10)
+        return 1.20
+
+    def _growth_factor(g):
+        # <3% → 0.90, 5-7% → 1.00, 10%+ → 1.15. Negative growth → 0.85.
+        if g < 0: return 0.85
+        if g < 0.03: return 0.90
+        if g < 0.05: return 0.90 + (g - 0.03) / 0.02 * (1.00 - 0.90)
+        if g < 0.07: return 1.00
+        if g < 0.10: return 1.00 + (g - 0.07) / 0.03 * (1.15 - 1.00)
+        return 1.15
+
+    def _margin_factor(rev, e):
+        if rev <= 0: return 1.00
+        margin = e / rev
+        if margin < 0.25: return 0.95
+        if margin < 0.30: return 0.95 + (margin - 0.25) / 0.05 * (1.00 - 0.95)
+        if margin < 0.35: return 1.00 + (margin - 0.30) / 0.05 * (1.05 - 1.00)
+        return 1.05
+
+    factors = {
+        "recurring": _recurring_factor(pct_recurring),
+        "size": _size_factor(aum),
+        "growth": _growth_factor(growth_rate),
+        "margin": _margin_factor(revenue, ebitda),
+        "book_quality": book_quality_score,
+        "geography": geography_score,
+        "key_person": key_person_score,
+    }
+
+    base_multiple = 7.0
+    multiplier = 1.0
+    for v in factors.values():
+        multiplier *= v
+    final_multiple = base_multiple * multiplier
+
+    mid = adj_ebitda * final_multiple
+    # Tighten the ±15% band when the profile is clean (high recurring,
+    # institutionalized, healthy margin) and widen for risky deals.
+    band_width = 0.15
+    if pct_recurring < 70 or factors["key_person"] < 0.95 or aum < 200_000_000:
+        band_width = 0.20
+
+    return {
+        "adj_ebitda": adj_ebitda,
+        "base_multiple": base_multiple,
+        "final_multiple": final_multiple,
+        "multiplier": multiplier,
+        "factors": factors,
+        "low": mid * (1 - band_width),
+        "mid": mid,
+        "high": mid * (1 + band_width),
+        "band_width": band_width,
+        "replacement_cost": replacement_cost,
+    }
 
 
 def _exit_multiple_from_recurring(pct_recurring: float) -> float:
@@ -210,6 +326,9 @@ def compute_irr_and_returns(
     pct_self_funded: float,
     pct_equity_rollover: float,
     pct_recurring: float = 100.0,
+    loan_schedule: pd.DataFrame = None,
+    note_schedule: pd.DataFrame = None,
+    pct_seller_note: float = 0.0,
 ) -> dict:
     """Compute IRR and cash-on-cash returns at years 3, 5, 7.
 
@@ -221,6 +340,12 @@ def compute_irr_and_returns(
     `pct_recurring` (50-100) controls the exit-multiple assumption: 50% →
     4× EBITDA, 100% → 6× EBITDA. Reflects RIA M&A precedent that fee-based
     recurring revenue earns a higher exit multiple than transactional.
+
+    `loan_schedule` and `note_schedule` are passed in so the terminal value
+    at exit can deduct remaining debt + remaining seller-note principal —
+    without this, a 60%-leverage Y5 exit shows IRR as if all the debt
+    magically disappeared at closing. Banker flagged this as a material
+    overstatement of levered IRR, not just incomplete.
     """
     total_cash_invested = purchase_price * pct_upfront * pct_self_funded
     exit_multiple = _exit_multiple_from_recurring(pct_recurring)
@@ -242,11 +367,28 @@ def compute_irr_and_returns(
     # Cash flows for IRR: initial outlay + annual net cash flows
     cf = [-total_cash_invested] + pro_forma["net_cash_flow"].tolist()
 
+    def _remaining_principal(schedule, year):
+        """End-of-year remaining balance from an amortization schedule."""
+        if schedule is None or len(schedule) == 0:
+            return 0.0
+        row = schedule[schedule["year"] == year]
+        if len(row) == 0:
+            # Past schedule horizon — fully paid down.
+            return 0.0
+        return float(row["end_balance"].iloc[0])
+
     for horizon in [3, 5, 7]:
         subset = cf[: horizon + 1]
-        # Add terminal value at exit (last year EBITDA × recurring-adjusted multiple)
+        # Add terminal value at exit (last year EBITDA × recurring-adjusted
+        # multiple), net of remaining debt and seller-note balance at exit.
         if horizon <= len(pro_forma):
-            terminal = pro_forma.iloc[min(horizon - 1, len(pro_forma) - 1)]["ebitda"] * exit_multiple
+            ebitda_at_exit = pro_forma.iloc[min(horizon - 1, len(pro_forma) - 1)]["ebitda"]
+            gross_terminal = ebitda_at_exit * exit_multiple
+            debt_at_exit = (
+                _remaining_principal(loan_schedule, horizon)
+                + _remaining_principal(note_schedule, horizon)
+            )
+            terminal = gross_terminal - debt_at_exit
             subset_with_tv = subset.copy()
             subset_with_tv[-1] += terminal
         else:

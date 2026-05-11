@@ -14,6 +14,12 @@ from calculations import (
     compute_earnout_scenarios, compute_seller_total_proceeds,
     sensitivity_irr, sensitivity_breakeven,
 )
+import sec_lookup
+
+
+@st.cache_data(show_spinner=False)
+def _load_adv_df():
+    return sec_lookup.load_adv_data()
 
 # -- Page config ---------------------------------------------------------------
 st.set_page_config(page_title="RIA M&A Calculator", page_icon="📊", layout="wide")
@@ -88,6 +94,27 @@ st.markdown("""
 # -- Session state -------------------------------------------------------------
 if "show_calculator" not in st.session_state:
     st.session_state.show_calculator = False
+if "sec_data" not in st.session_state:
+    st.session_state.sec_data = None  # sec_lookup.FirmData or None
+if "pending_reconcile" not in st.session_state:
+    st.session_state.pending_reconcile = False
+if "pending_apply" not in st.session_state:
+    st.session_state.pending_apply = {}  # {widget_key: value}
+
+
+def _queue_apply(widget_key: str, value):
+    """Stage a value to be written into a widget's session_state on the next
+    rerun. We do this in a queue rather than writing directly because Streamlit
+    forbids mutating a widget's session_state value after the widget has rendered."""
+    st.session_state.pending_apply[widget_key] = value
+
+
+def _apply_pending():
+    """Flush queued values into widget session_state. Call BEFORE rendering
+    the affected widgets."""
+    for key, value in list(st.session_state.pending_apply.items()):
+        st.session_state[key] = value
+    st.session_state.pending_apply.clear()
 
 PLOTLY_LAYOUT = dict(
     paper_bgcolor="rgba(0,0,0,0)",
@@ -591,8 +618,9 @@ def render_instructions_tab():
 
 def currency_input(label, default, key, help_text=None):
     """Text input that displays and accepts comma-formatted dollar amounts."""
-    formatted_default = f"{default:,.0f}"
-    raw = st.sidebar.text_input(label, value=formatted_default, key=key, help=help_text)
+    if key not in st.session_state:
+        st.session_state[key] = f"{default:,.0f}"
+    raw = st.sidebar.text_input(label, key=key, help=help_text)
     try:
         cleaned = raw.replace(",", "").replace("$", "").replace(" ", "").strip()
         val = int(float(cleaned))
@@ -618,16 +646,189 @@ if not st.session_state.show_calculator:
 st.sidebar.markdown("## RIA M&A Calculator")
 st.sidebar.markdown("---")
 
+# Flush any queued SEC-driven value updates BEFORE the widgets render.
+_apply_pending()
+
+# -- Lookup RIA (SEC Form ADV) -------------------------------------------------
+st.sidebar.markdown("### Lookup RIA")
+search_query = st.sidebar.text_input(
+    "Search by firm name",
+    key="sec_search",
+    placeholder="e.g., Edelman Financial",
+    help="Searches the SEC's bulk Form ADV dataset (~16K SEC-registered RIAs).",
+)
+if search_query and len(search_query.strip()) >= 3:
+    _adv_df = _load_adv_df()
+    if _adv_df.empty:
+        st.sidebar.caption("⚠ SEC data file not found. Run `scripts/build_adv_data.py`.")
+    else:
+        _matches = sec_lookup.search_firms(search_query, _adv_df)
+        if _matches:
+            _sel_idx = st.sidebar.selectbox(
+                "Matching firms",
+                options=list(range(len(_matches))),
+                format_func=lambda i: f"{_matches[i].firm_name} (AUM ${_matches[i].aum/1e9:.1f}B)",
+                key="sec_selected_idx",
+            )
+            if st.sidebar.button("Load SEC data", key="sec_load_btn", type="primary", use_container_width=True):
+                st.session_state.sec_data = sec_lookup.get_firm_data(
+                    _matches[_sel_idx].crd, _adv_df
+                )
+                st.session_state.pending_reconcile = True
+                st.rerun()
+        else:
+            st.sidebar.caption("No matches.")
+
+# Show a small banner with the loaded firm + clear button
+if st.session_state.sec_data is not None:
+    _sec = st.session_state.sec_data
+    st.sidebar.caption(
+        f"📄 SEC: **{_sec.firm_name}** — as of {_sec.as_of_date or 'n/a'}"
+    )
+    if st.sidebar.button("Clear SEC data", key="sec_clear_btn"):
+        st.session_state.sec_data = None
+        st.session_state.pending_reconcile = False
+        st.rerun()
+
+st.sidebar.markdown("---")
+
+
+def _current_aum_int() -> int:
+    """Parse the current AUM widget value to int, for reconciliation comparison."""
+    raw = st.session_state.get("aum", "500,000,000")
+    try:
+        return int(float(str(raw).replace(",", "").replace("$", "").strip()))
+    except (ValueError, TypeError):
+        return 500_000_000
+
+
+def _sec_field_badge(field_key: str, sec_value, fmt_fn, label: str):
+    """Render a small caption + revert button below an input.
+    Clicking the button queues the SEC value for the input on the next rerun."""
+    if st.session_state.sec_data is None or sec_value is None:
+        return
+    col1, col2 = st.sidebar.columns([3, 1])
+    col1.caption(f"SEC: {fmt_fn(sec_value)}")
+    if col2.button("↺", key=f"revert_{field_key}", help=f"Use SEC value for {label}"):
+        _queue_apply(field_key, sec_value)
+        st.rerun()
+
+
 # -- Target Firm ---------------------------------------------------------------
 st.sidebar.markdown("### Target Firm")
+_sec = st.session_state.sec_data
+
 aum = currency_input("AUM ($)", 500_000_000, "aum")
+if _sec is not None:
+    _sec_field_badge("aum", int(_sec.aum), lambda v: f"${v:,.0f}", "AUM")
+
 annual_revenue = currency_input("Annual Revenue ($)", 4_000_000, "revenue")
+if _sec is not None:
+    _sec_field_badge(
+        "revenue", int(_sec.estimated_revenue),
+        lambda v: f"${v:,.0f} (est: AUM × 0.75%)", "Revenue",
+    )
+
 ebitda = currency_input("EBITDA ($)", 1_600_000, "ebitda")
 owner_comp = currency_input("Owner's Compensation ($)", 500_000, "owner_comp")
-num_clients = st.sidebar.number_input("Number of Clients", value=200, step=10)
-rev_growth = st.sidebar.slider("Revenue Growth Rate (%)", 0.0, 15.0, 5.0, 0.5) / 100
+
+if "num_clients" not in st.session_state:
+    st.session_state["num_clients"] = 200
+num_clients = st.sidebar.number_input(
+    "Number of Clients", step=10, key="num_clients"
+)
+if _sec is not None and _sec.num_clients and _sec.num_clients > 0:
+    _sec_field_badge(
+        "num_clients", int(_sec.num_clients), lambda v: f"{v:,}", "Clients"
+    )
+
+if "rev_growth_pct" not in st.session_state:
+    st.session_state["rev_growth_pct"] = 5.0
+rev_growth_pct = st.sidebar.slider(
+    "Revenue Growth Rate (%)", 0.0, 15.0, step=0.5, key="rev_growth_pct"
+)
+rev_growth = rev_growth_pct / 100
+if _sec is not None and _sec.growth_rate is not None:
+    _sec_field_badge(
+        "rev_growth_pct",
+        round(max(0.0, min(15.0, _sec.growth_rate * 100)), 1),
+        lambda v: f"{v:.1f}% YoY",
+        "Growth",
+    )
+
 pct_recurring = st.sidebar.slider("% Recurring Revenue", 50, 100, 90, 5)
 attrition_rate = st.sidebar.slider("Client Attrition Rate (%)", 0.0, 20.0, 5.0, 0.5) / 100
+
+
+# -- Reconciliation dialog (shown once after each successful lookup) -----------
+def _render_reconcile_dialog():
+    sec = st.session_state.sec_data
+    if sec is None:
+        return
+
+    @st.dialog(f"Apply SEC data: {sec.firm_name}")
+    def _dlg():
+        st.caption(f"Filing as of {sec.as_of_date or 'unknown'}. "
+                   f"Pick which value to use for each field.")
+
+        decisions: dict[str, tuple[str, object]] = {}
+
+        def _row(key: str, label: str, current_display: str, sec_value, sec_display: str):
+            st.markdown(f"**{label}**")
+            choice = st.radio(
+                label,
+                options=[f"SEC: {sec_display}", f"Keep mine: {current_display}"],
+                index=0,
+                horizontal=True,
+                key=f"reconcile_radio_{key}",
+                label_visibility="collapsed",
+            )
+            decisions[key] = (choice, sec_value)
+
+        _row("aum", "AUM",
+             f"${_current_aum_int():,}",
+             int(sec.aum), f"${int(sec.aum):,}")
+
+        if sec.num_clients and sec.num_clients > 0:
+            _row("num_clients", "Number of Clients",
+                 f"{int(st.session_state.get('num_clients', 200)):,}",
+                 int(sec.num_clients), f"{int(sec.num_clients):,}")
+
+        est_rev = int(sec.estimated_revenue)
+        try:
+            cur_rev = int(float(str(st.session_state.get('revenue', '4,000,000'))
+                                 .replace(',', '').replace('$', '').strip()))
+        except (ValueError, TypeError):
+            cur_rev = 4_000_000
+        _row("revenue", "Annual Revenue (est: AUM × 0.75%)",
+             f"${cur_rev:,}", est_rev, f"${est_rev:,}")
+
+        if sec.growth_rate is not None:
+            growth_pct = round(max(0.0, min(15.0, sec.growth_rate * 100)), 1)
+            cur_growth = float(st.session_state.get("rev_growth_pct", 5.0))
+            _row("rev_growth_pct", "Revenue Growth Rate",
+                 f"{cur_growth:.1f}%", growth_pct, f"{growth_pct:.1f}% (YoY AUM)")
+
+        st.markdown("---")
+        c1, c2 = st.columns(2)
+        if c1.button("Apply selected", type="primary", use_container_width=True):
+            for key, (choice, sec_value) in decisions.items():
+                if choice.startswith("SEC:"):
+                    if key in ("aum", "revenue"):
+                        _queue_apply(key, f"{int(sec_value):,}")
+                    else:
+                        _queue_apply(key, sec_value)
+            st.session_state.pending_reconcile = False
+            st.rerun()
+        if c2.button("Skip", use_container_width=True):
+            st.session_state.pending_reconcile = False
+            st.rerun()
+
+    _dlg()
+
+
+if st.session_state.pending_reconcile and st.session_state.sec_data is not None:
+    _render_reconcile_dialog()
 
 st.sidebar.markdown("---")
 

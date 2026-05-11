@@ -15,7 +15,6 @@ from calculations import (
     sensitivity_irr, sensitivity_breakeven,
 )
 import sec_lookup
-import json
 import tempfile
 import urllib.request
 import urllib.error
@@ -31,14 +30,17 @@ _ADV_LOCAL_PATH = Path(__file__).parent / "data" / "adv_current.parquet"
 
 @st.cache_resource(show_spinner="Fetching SEC ADV data…")
 def _ensure_adv_data_path():
-    """Resolve the parquet location, downloading from private GitHub release
+    """Resolve the parquet location, downloading from a private GitHub repo
     if no local copy exists. Returns a Path or None when nothing is available.
 
     Resolution order:
         1. Local dev file at data/adv_current.parquet (gitignored)
         2. /tmp cache from a prior fetch in this container
-        3. Private GitHub release, authenticated with secrets ADV_DATA_TOKEN
-           and (optional) ADV_DATA_REPO + ADV_DATA_ASSET.
+        3. Private GitHub repo at branch HEAD via the Contents API,
+           authenticated with secret ADV_DATA_TOKEN. Optional secrets:
+           ADV_DATA_REPO (default "Jani7/ria-ma-data"),
+           ADV_DATA_PATH (default "adv_current.parquet"),
+           ADV_DATA_REF  (default "main").
         4. None — UI shows "data unavailable" caption.
     """
     if _ADV_LOCAL_PATH.exists():
@@ -48,47 +50,44 @@ def _ensure_adv_data_path():
 
     token = None
     repo = "Jani7/ria-ma-data"
-    asset_name = "adv_current.parquet"
+    file_path = "adv_current.parquet"
+    ref = "main"
     try:
         if "ADV_DATA_TOKEN" in st.secrets:
             token = st.secrets["ADV_DATA_TOKEN"]
         if "ADV_DATA_REPO" in st.secrets:
             repo = st.secrets["ADV_DATA_REPO"]
-        if "ADV_DATA_ASSET" in st.secrets:
-            asset_name = st.secrets["ADV_DATA_ASSET"]
-    except (FileNotFoundError, Exception):
+        if "ADV_DATA_PATH" in st.secrets:
+            file_path = st.secrets["ADV_DATA_PATH"]
+        if "ADV_DATA_REF" in st.secrets:
+            ref = st.secrets["ADV_DATA_REF"]
+    except Exception:
+        # st.secrets may not be available in some local-dev contexts.
         pass
 
     if not token:
         return None
 
     try:
-        api = f"https://api.github.com/repos/{repo}/releases/latest"
+        # Contents API with Accept: application/vnd.github.raw returns the
+        # file bytes directly — no separate asset/blob download step.
+        api = f"https://api.github.com/repos/{repo}/contents/{file_path}?ref={ref}"
         req = urllib.request.Request(
             api,
             headers={
                 "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
+                "Accept": "application/vnd.github.raw",
                 "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": "ria-ma-calculator",
             },
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            release = json.loads(resp.read())
-        asset = next(a for a in release["assets"] if a["name"] == asset_name)
-        dl_req = urllib.request.Request(
-            asset["url"],
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/octet-stream",
-                "User-Agent": "ria-ma-calculator",
-            },
-        )
         _ADV_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(dl_req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             _ADV_CACHE_PATH.write_bytes(resp.read())
         return _ADV_CACHE_PATH
-    except (urllib.error.URLError, KeyError, StopIteration, json.JSONDecodeError):
+    except (urllib.error.URLError, OSError):
+        # Intentionally narrow: never bubble up exception text that might
+        # carry the Authorization header to the UI.
         return None
 
 

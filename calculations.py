@@ -639,6 +639,125 @@ def build_seller_note_amortization(
     return pd.DataFrame(rows)
 
 
+def _aum_tier_for(aum: float) -> str:
+    """Map an AUM value to one of the five comp-database tier strings."""
+    if aum < 200_000_000:
+        return "<200M"
+    if aum < 500_000_000:
+        return "200M-500M"
+    if aum < 1_000_000_000:
+        return "500M-1B"
+    if aum < 5_000_000_000:
+        return "1B-5B"
+    return "5B+"
+
+
+def _recurring_tier_for(pct_recurring: float) -> str:
+    """Map a recurring-revenue % (0-100) to one of the three comp tiers."""
+    if pct_recurring < 70:
+        return "<70%"
+    if pct_recurring < 90:
+        return "70-90%"
+    return "90%+"
+
+
+# Adjacent AUM tiers used when the primary slice has too few comps. Ordered
+# inside-out so a 500M-1B miss looks at 200M-500M and 1B-5B before fanning
+# wider. Keeps the fallback localized to economically similar deals rather
+# than collapsing the whole table.
+_ADJACENT_AUM_TIERS = {
+    "<200M": ["200M-500M"],
+    "200M-500M": ["<200M", "500M-1B"],
+    "500M-1B": ["200M-500M", "1B-5B"],
+    "1B-5B": ["500M-1B", "5B+"],
+    "5B+": ["1B-5B"],
+}
+
+
+def lookup_comps_band(
+    aum: float,
+    pct_recurring: float,
+    comps_df: pd.DataFrame,
+) -> dict:
+    """Return P25 / median / P75 of EV/EBITDA and EV/Revenue for the
+    relevant AUM x recurring slice. Falls back to a wider AUM band if the
+    primary slice has <5 deals; returns None for either multiple when the
+    slice is too thin to be meaningful.
+
+    Returns a dict with keys:
+        aum_tier, recurring_tier: the chosen slice labels
+        n_primary: deals in the primary AUM x recurring slice
+        n_used: deals used to compute the band after any fallback
+        fallback: True if we widened the slice
+        ev_ebitda: dict of {p25, median, p75} or None if too thin
+        ev_revenue: dict of {p25, median, p75} or None if too thin
+        slice_df: the DataFrame rows used (for downstream UI)
+    """
+    if comps_df is None or len(comps_df) == 0:
+        return {
+            "aum_tier": _aum_tier_for(aum),
+            "recurring_tier": _recurring_tier_for(pct_recurring),
+            "n_primary": 0,
+            "n_used": 0,
+            "fallback": False,
+            "ev_ebitda": None,
+            "ev_revenue": None,
+            "slice_df": comps_df,
+        }
+
+    aum_tier = _aum_tier_for(aum)
+    rec_tier = _recurring_tier_for(pct_recurring)
+
+    primary = comps_df[
+        (comps_df["aum_tier"] == aum_tier)
+        & (comps_df["recurring_tier"] == rec_tier)
+    ]
+    n_primary = len(primary)
+
+    used = primary
+    fallback = False
+    if n_primary < 5:
+        widened_tiers = [aum_tier] + _ADJACENT_AUM_TIERS.get(aum_tier, [])
+        widened = comps_df[
+            (comps_df["aum_tier"].isin(widened_tiers))
+            & (comps_df["recurring_tier"] == rec_tier)
+        ]
+        if len(widened) >= 5:
+            used = widened
+            fallback = True
+        else:
+            widened2 = comps_df[comps_df["aum_tier"].isin(widened_tiers)]
+            if len(widened2) >= 5:
+                used = widened2
+                fallback = True
+            else:
+                used = primary
+
+    def _band(series: pd.Series):
+        series = series.dropna()
+        if len(series) < 5:
+            return None
+        return {
+            "p25": float(series.quantile(0.25)),
+            "median": float(series.median()),
+            "p75": float(series.quantile(0.75)),
+        }
+
+    ev_ebitda = _band(used["ev_ebitda_multiple"]) if "ev_ebitda_multiple" in used.columns else None
+    ev_revenue = _band(used["ev_revenue_multiple"]) if "ev_revenue_multiple" in used.columns else None
+
+    return {
+        "aum_tier": aum_tier,
+        "recurring_tier": rec_tier,
+        "n_primary": n_primary,
+        "n_used": len(used),
+        "fallback": fallback,
+        "ev_ebitda": ev_ebitda,
+        "ev_revenue": ev_revenue,
+        "slice_df": used,
+    }
+
+
 def compute_dscr(pro_forma: pd.DataFrame) -> pd.Series:
     """Debt Service Coverage Ratio = EBITDA / (Debt Service + Seller Note Payment).
 

@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 from calculations import (
     compute_eboc, implied_multiples, build_pro_forma,
     compute_irr_and_returns, build_loan_amortization,
@@ -15,6 +16,7 @@ from calculations import (
     suggest_deal_structure,
     compute_earnout_scenarios, compute_seller_total_proceeds,
     sensitivity_irr, sensitivity_breakeven,
+    lookup_comps_band,
 )
 import sec_lookup
 import tempfile
@@ -151,6 +153,36 @@ def _load_adv_df_by_path(path_str: str):
 def _load_adv_df():
     p = _ensure_adv_data_path()
     return _load_adv_df_by_path(str(p) if p else "")
+
+
+# -- Comps database ------------------------------------------------------------
+_COMPS_CSV_PATH = Path(__file__).parent / "data" / "ria_ma_comps.csv"
+
+
+@st.cache_data(show_spinner=False)
+def _load_comps_df():
+    """Load the manually curated RIA M&A transaction database.
+
+    Returns an empty DataFrame (with the expected columns) when the file is
+    missing, so the rest of the app keeps rendering. The file ships in-repo
+    at data/ria_ma_comps.csv; refresh quarterly per scripts/seed_comps.py.
+    """
+    cols = [
+        "date", "buyer", "seller", "seller_aum",
+        "ev_revenue_multiple", "ev_ebitda_multiple",
+        "aum_tier", "recurring_tier", "channel", "source_url", "notes",
+    ]
+    if not _COMPS_CSV_PATH.exists():
+        return pd.DataFrame(columns=cols)
+    try:
+        df = pd.read_csv(_COMPS_CSV_PATH)
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        for c in ("seller_aum", "ev_revenue_multiple", "ev_ebitda_multiple"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame(columns=cols)
+
 
 # -- Page config ---------------------------------------------------------------
 st.set_page_config(page_title="RIA M&A Calculator", page_icon="📊", layout="wide")
@@ -2017,6 +2049,131 @@ with tab1:
             _queue_apply("pct_equity_rollover", int(round(sd['rollover'] * 100)))
             st.toast(f"Applied {sd['profile'].replace('_', ' ')} structure.", icon="✅")
             st.rerun()
+
+    # ---- Comps Overlay (banker memo, Part D) ----
+    # Anchor the firm's implied EBITDA multiple against a curated database
+    # so a banker can read "where does this deal price vs comps" at a glance.
+    comps_df = _load_comps_df()
+    if len(comps_df) > 0:
+        st.markdown('<div class="section-header">Comparable Transactions</div>', unsafe_allow_html=True)
+        band = lookup_comps_band(aum, pct_recurring, comps_df)
+        deal_ebitda_mult = (purchase_price / valuation["adj_ebitda"]) if valuation["adj_ebitda"] > 0 else 0
+
+        ev = band.get("ev_ebitda")
+        if ev is None:
+            st.caption(
+                f"Too few comps in the {band['aum_tier']} x {band['recurring_tier']} slice "
+                "to produce a meaningful band. Showing the full transaction table below."
+            )
+        else:
+            if ev["p25"] <= deal_ebitda_mult <= ev["p75"]:
+                deal_class, verdict = "positive", "in band"
+            elif abs(deal_ebitda_mult - ev["median"]) < 0.5:
+                deal_class, verdict = "neutral", "near band edge"
+            elif deal_ebitda_mult > ev["p75"]:
+                deal_class, verdict = "negative", "above band"
+            else:
+                deal_class, verdict = "negative", "below band"
+
+            cb1, cb2, cb3, cb4 = st.columns(4)
+            with cb1:
+                st.markdown(metric_card("P25 EV/EBITDA", f"{ev['p25']:.1f}x", "neutral"), unsafe_allow_html=True)
+            with cb2:
+                st.markdown(metric_card("Median EV/EBITDA", f"{ev['median']:.1f}x", "accent"), unsafe_allow_html=True)
+            with cb3:
+                st.markdown(metric_card("P75 EV/EBITDA", f"{ev['p75']:.1f}x", "neutral"), unsafe_allow_html=True)
+            with cb4:
+                st.markdown(
+                    metric_card(f"Your Deal ({verdict})", f"{deal_ebitda_mult:.1f}x", deal_class),
+                    unsafe_allow_html=True,
+                )
+
+            _slice_label = f"{band['aum_tier']} AUM x {band['recurring_tier']} recurring"
+            _fallback_note = " (widened — primary slice was thin)" if band["fallback"] else ""
+            st.caption(
+                f"Band drawn from N = {band['n_used']} deals in the {_slice_label} slice"
+                f"{_fallback_note}. EV/EBITDA shown; EV/Revenue available in the table below."
+            )
+
+        plot_df = comps_df.dropna(subset=["ev_ebitda_multiple", "seller_aum"]).copy()
+        if len(plot_df) > 0:
+            try:
+                fig_scatter = px.scatter(
+                    plot_df,
+                    x="seller_aum",
+                    y="ev_ebitda_multiple",
+                    color="recurring_tier",
+                    symbol="channel",
+                    hover_data={
+                        "buyer": True, "seller": True,
+                        "date": "|%Y-%m-%d", "seller_aum": ":,.0f",
+                        "ev_ebitda_multiple": ":.1f",
+                        "ev_revenue_multiple": ":.2f",
+                    },
+                    log_x=True,
+                    color_discrete_sequence=COLORS,
+                    labels={
+                        "seller_aum": "Seller AUM ($, log)",
+                        "ev_ebitda_multiple": "EV / EBITDA Multiple",
+                        "recurring_tier": "Recurring",
+                        "channel": "Channel",
+                    },
+                )
+                fig_scatter.update_traces(marker=dict(size=10, opacity=0.78,
+                                                     line=dict(color="rgba(255,255,255,0.15)", width=0.5)))
+                if valuation["adj_ebitda"] > 0:
+                    fig_scatter.add_trace(go.Scatter(
+                        x=[aum], y=[deal_ebitda_mult],
+                        mode="markers",
+                        name="Your Deal",
+                        marker=dict(symbol="star", size=22, color="#fbbf24",
+                                    line=dict(color="#0f1115", width=1.5)),
+                        hovertemplate=(
+                            "Your Deal<br>AUM: $%{x:,.0f}<br>"
+                            "EV/EBITDA: %{y:.1f}x<extra></extra>"
+                        ),
+                    ))
+                fig_scatter.update_layout(**plotly_layout(),
+                                          title="Peer Transactions — EV/EBITDA by Seller AUM",
+                                          height=420)
+                st.plotly_chart(fig_scatter, use_container_width=True)
+            except Exception as _e:
+                st.caption(f"(Peer scatter unavailable: {type(_e).__name__})")
+
+        with st.expander("Browse transaction database", expanded=False):
+            f1, f2 = st.columns(2)
+            aum_tier_opts = ["All"] + sorted(comps_df["aum_tier"].dropna().unique().tolist())
+            channel_opts = ["All"] + sorted(comps_df["channel"].dropna().unique().tolist())
+            with f1:
+                _aum_filter = st.selectbox("AUM tier", aum_tier_opts, key="comps_aum_filter")
+            with f2:
+                _ch_filter = st.selectbox("Channel", channel_opts, key="comps_channel_filter")
+
+            tbl = comps_df.copy()
+            if _aum_filter != "All":
+                tbl = tbl[tbl["aum_tier"] == _aum_filter]
+            if _ch_filter != "All":
+                tbl = tbl[tbl["channel"] == _ch_filter]
+
+            display = pd.DataFrame({
+                "Date": tbl["date"].dt.strftime("%Y-%m-%d"),
+                "Buyer": tbl["buyer"],
+                "Seller": tbl["seller"],
+                "Seller AUM": tbl["seller_aum"].apply(fmt_dollar),
+                "EV/EBITDA": tbl["ev_ebitda_multiple"].apply(
+                    lambda v: f"{v:.1f}x" if pd.notna(v) else "—"
+                ),
+                "EV/Revenue": tbl["ev_revenue_multiple"].apply(
+                    lambda v: f"{v:.2f}x" if pd.notna(v) else "—"
+                ),
+            }).sort_values("Date", ascending=False)
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+        st.caption(
+            "_Comps reflect publicly disclosed terms; private mid-market deals "
+            "skew unrepresented and may trade 0.5-1.0x lower than headline "
+            f"aggregator transactions. N = {len(comps_df)}._"
+        )
 
     st.markdown('<div class="section-header">Purchase Price & Implied Multiples</div>', unsafe_allow_html=True)
 

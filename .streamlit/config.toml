@@ -1,6 +1,15 @@
-# Theme is owned by app.py (st.session_state["theme"] + injected CSS) so
-# users can toggle dark/light at runtime. Setting a [theme] block here
-# would override our injected CSS via Streamlit's runtime variables.
+# Single dark theme owned by Streamlit's native theming so chrome (tooltips,
+# date pickers, file pickers, selectbox dropdowns) matches the app shell out
+# of the box. App-level CSS in app.py layers polish on top — it never has to
+# fight Streamlit's runtime variables now that the toggle is gone.
 
 [server]
 headless = true
+
+[theme]
+base = "dark"
+primaryColor = "#7c8cff"
+backgroundColor = "#0b0d12"
+secondaryBackgroundColor = "#12151c"
+textColor = "#e5e9f0"
+font = "sans serif"

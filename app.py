@@ -153,310 +153,371 @@ def _load_adv_df():
 # -- Page config ---------------------------------------------------------------
 st.set_page_config(page_title="RIA M&A Calculator", page_icon="📊", layout="wide")
 
-# -- Theme state (initialized BEFORE CSS injection so the first paint is correct)
-if "theme" not in st.session_state:
-    st.session_state.theme = "dark"
-
-_DARK_CSS = """
+# Single dark theme — the runtime toggle was removed (May 2026) after a string
+# of bugs where Streamlit's --primary-color/--background-color variables fought
+# our injected CSS. The base palette now lives in .streamlit/config.toml so
+# Streamlit's own chrome (tooltips, dropdowns, date pickers) is consistent;
+# the CSS below only adds polish on top — no `!important` overrides needed
+# to fix a competing light theme. If a future contributor wants light mode
+# back, restore it as a separate stylesheet — do NOT layer it on top of this.
+#
+# Palette (Linear/Vercel-inspired):
+#   --bg          #0b0d12   page background
+#   --panel       #12151c   cards, tabs, sidebar inputs
+#   --panel-hi    #1a1f2b   hover/active state
+#   --border      #232938   1px borders
+#   --border-hi   #2f3646   stronger borders / dividers
+#   --text        #e5e9f0   primary text
+#   --muted       #8b94a8   secondary text
+#   --subtle      #6b7385   tertiary text
+#   --accent      #7c8cff   indigo primary (buttons, focus rings)
+#   --accent-hi   #95a3ff   accent hover
+#   --positive    #4ade80   green
+#   --warning     #fbbf24   amber
+#   --negative    #f87171   red
+_THEME_CSS = """
 <style>
-    /* Streamlit's default light theme leaks through if we only style our
-       custom classes — override the CSS variables and key chrome here. */
-    :root, .stApp, [data-theme] {
-        --primary-color: #4a90d9 !important;
-        --background-color: #0e1117 !important;
-        --secondary-background-color: #131722 !important;
-        --text-color: #e2e8f0 !important;
+    /* ---- Typography ---------------------------------------------------- */
+    html, body, [class*="css"] {
+        -webkit-font-smoothing: antialiased;
+        font-feature-settings: "ss01", "cv11";
     }
-    .stApp { background-color: #0e1117 !important; color: #e2e8f0 !important; }
-    section[data-testid="stSidebar"],
-    div[data-testid="stSidebar"],
-    div[data-testid="stSidebar"] > div {
-        background-color: #131722 !important;
-        color: #e2e8f0 !important;
-    }
-    div[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-    div[data-testid="stSidebar"] a { color: #63b3ed !important; }
-    /* Primary buttons — Streamlit's default red doesn't fit the brand.
-       Override explicitly because the --primary-color CSS variable
-       doesn't reach the button's background-color rule. */
-    .stButton > button[kind="primary"],
-    div[data-testid="stSidebar"] .stButton > button[kind="primary"] {
-        background-color: #4a90d9 !important;
-        color: #ffffff !important;
-        border: 1px solid #4a90d9 !important;
-    }
-    .stButton > button[kind="primary"]:hover,
-    div[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
-        background-color: #3a7bc8 !important;
-        border-color: #3a7bc8 !important;
-        color: #ffffff !important;
-    }
-    /* Secondary buttons in dark theme — light grey border, dark fill. */
-    .stButton > button:not([kind="primary"]),
-    div[data-testid="stSidebar"] .stButton > button:not([kind="primary"]) {
-        background-color: #1a1f2e !important;
-        color: #e2e8f0 !important;
-        border: 1px solid #2d3748 !important;
-    }
-    .stButton > button:not([kind="primary"]):hover,
-    div[data-testid="stSidebar"] .stButton > button:not([kind="primary"]):hover {
-        background-color: #2d3748 !important;
-        border-color: #4a90d9 !important;
-        color: #4a90d9 !important;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #1a1f2e 0%, #16192b 100%);
-        border: 1px solid #2d3748;
-        border-radius: 12px;
-        padding: 16px 12px;
-        text-align: center;
-        margin: 5px;
-        min-height: 110px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-    }
-    .metric-card h3 {
-        color: #8b95a5;
-        font-size: 0.7rem;
-        font-weight: 600;
-        margin-bottom: 8px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .metric-card h2 {
-        color: #e2e8f0;
-        font-size: 1.5rem;
-        font-weight: 700;
-        margin: 0;
-        white-space: nowrap;
-    }
-    .metric-card .positive { color: #48bb78; }
-    .metric-card .negative { color: #fc8181; }
-    .metric-card .neutral { color: #63b3ed; }
-    .section-header {
-        color: #e2e8f0;
-        border-bottom: 2px solid #4a90d9;
-        padding-bottom: 8px;
-        margin: 25px 0 15px 0;
-        font-size: 1.1rem;
-        font-weight: 600;
-    }
-    div[data-testid="stSidebar"] {
-        background-color: #131722;
-    }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] {
-        background-color: #1a1f2e;
-        border-radius: 8px 8px 0 0;
-        padding: 10px 20px;
-        color: #8b95a5;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #2d3748;
-        color: #e2e8f0;
-    }
-    /* Compact sidebar inputs */
-    div[data-testid="stSidebar"] .stTextInput > div > div > input {
-        font-family: 'SF Mono', 'Consolas', monospace;
-        font-size: 0.95rem;
-    }
-    /* Constrain tooltip width inside the sidebar so the help-icon popover
-       doesn't overflow left at narrow viewports. */
-    div[data-testid="stSidebar"] div[role="tooltip"] {
-        max-width: 240px;
-        white-space: normal;
-        word-wrap: break-word;
-    }
-    /* Site footer (dark) */
-    .site-footer {
-        border-top: 1px solid #2d3748;
-        margin: 36px auto 0 auto;
-        padding: 18px 12px 28px 12px;
-        text-align: center;
-        color: #8b95a5;
-        font-size: 0.78rem;
-        line-height: 1.55;
-        max-width: 880px;
-    }
-    .site-footer a { color: #63b3ed; text-decoration: none; }
-    .site-footer a:hover { text-decoration: underline; }
-    .site-footer .footer-meta { color: #6b7280; margin-top: 8px; }
-</style>
-"""
+    .stApp { background-color: #0b0d12; color: #e5e9f0; }
 
-_LIGHT_CSS = """
-<style>
-    /* Override Streamlit's hard-coded dark theme variables from
-       .streamlit/config.toml. These take CSS-variable precedence over our
-       per-element rules below, so we have to flip them at the root. */
-    :root, .stApp, [data-theme] {
-        --primary-color: #2b6cb0 !important;
-        --background-color: #ffffff !important;
-        --secondary-background-color: #f7fafc !important;
-        --text-color: #1a202c !important;
-        --font: "sans serif" !important;
+    /* ---- Hide Streamlit's own header chrome (cleaner first paint) ----- */
+    header[data-testid="stHeader"] {
+        background: transparent;
     }
-    .stApp { background-color: #ffffff !important; color: #1a202c !important; }
-    /* Sidebar — force light gray over Streamlit's runtime dark value. */
-    section[data-testid="stSidebar"],
-    div[data-testid="stSidebar"],
-    div[data-testid="stSidebar"] > div {
-        background-color: #f7fafc !important;
-        color: #1a202c !important;
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
+
+    /* ---- Sidebar ------------------------------------------------------- */
+    section[data-testid="stSidebar"] > div {
+        background-color: #0e1118;
+        border-right: 1px solid #1c2230;
+        padding-top: 12px;
     }
-    div[data-testid="stSidebar"] * { color: #1a202c !important; }
-    div[data-testid="stSidebar"] a { color: #2b6cb0 !important; }
-    /* Markdown text in the main pane. */
-    .stMarkdown, .stMarkdown p, .stMarkdown li,
-    label, .stCaption, .stTextInput label, .stNumberInput label,
-    .stSlider label, .stSelectbox label, .stRadio label {
-        color: #1a202c !important;
+    section[data-testid="stSidebar"] hr {
+        margin: 14px 0 12px 0;
+        border-color: #1c2230;
     }
-    .metric-card {
-        background: linear-gradient(135deg, #f7fafc 0%, #edf2f7 100%);
-        border: 1px solid #cbd5e0;
-        border-radius: 12px;
-        padding: 16px 12px;
-        text-align: center;
-        margin: 5px;
-        min-height: 110px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-    }
-    .metric-card h3 {
-        color: #4a5568;
-        font-size: 0.7rem;
+    section[data-testid="stSidebar"] h3 {
+        font-size: 0.72rem;
         font-weight: 600;
-        margin-bottom: 8px;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
-        letter-spacing: 0.03em;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        color: #8b94a8;
+        margin: 4px 0 10px 0;
     }
-    .metric-card h2 {
-        color: #1a202c;
-        font-size: 1.5rem;
-        font-weight: 700;
-        margin: 0;
-        white-space: nowrap;
+    section[data-testid="stSidebar"] label p {
+        font-size: 0.82rem;
+        color: #c5cad6;
+        margin-bottom: 4px;
     }
-    .metric-card .positive { color: #2f855a; }
-    .metric-card .negative { color: #c53030; }
-    .metric-card .neutral { color: #2b6cb0; }
-    .section-header {
-        color: #1a202c;
-        border-bottom: 2px solid #2b6cb0;
-        padding-bottom: 8px;
-        margin: 25px 0 15px 0;
-        font-size: 1.1rem;
-        font-weight: 600;
+    section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+    section[data-testid="stSidebar"] .stCaption {
+        font-size: 0.72rem;
+        color: #6b7385;
+        line-height: 1.45;
     }
-    div[data-testid="stSidebar"] {
-        background-color: #f7fafc;
+    /* Tighter spacing between sidebar widgets so we can fit more density
+       without it feeling crammed. */
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div {
+        gap: 0.45rem;
     }
-    div[data-testid="stSidebar"] * { color: #1a202c; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] {
-        background-color: #edf2f7;
-        border-radius: 8px 8px 0 0;
-        padding: 10px 20px;
-        color: #4a5568;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #ffffff;
-        color: #1a202c;
-        border: 1px solid #cbd5e0;
-        border-bottom: none;
-    }
-    div[data-testid="stSidebar"] .stTextInput > div > div > input {
-        font-family: 'SF Mono', 'Consolas', monospace;
-        font-size: 0.95rem;
-    }
-    div[data-testid="stSidebar"] div[role="tooltip"] {
-        max-width: 240px;
-        white-space: normal;
-        word-wrap: break-word;
-    }
-    /* Buttons — Streamlit's default light theme leaves them with dark
-       backgrounds and dark text on a white page. Override explicitly. */
-    .stButton > button,
-    div[data-testid="stSidebar"] .stButton > button {
-        background-color: #ffffff;
-        color: #1a202c;
-        border: 1px solid #cbd5e0;
-    }
-    .stButton > button:hover,
-    div[data-testid="stSidebar"] .stButton > button:hover {
-        background-color: #f7fafc;
-        border-color: #2b6cb0;
-        color: #2b6cb0;
-    }
-    .stButton > button[kind="primary"],
-    div[data-testid="stSidebar"] .stButton > button[kind="primary"] {
-        background-color: #2b6cb0;
-        color: #ffffff;
-        border: 1px solid #2b6cb0;
-    }
-    .stButton > button[kind="primary"]:hover,
-    div[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
-        background-color: #2c5282;
-        color: #ffffff;
-        border-color: #2c5282;
-    }
-    /* Inputs and dropdowns — keep them readable on white. */
+
+    /* ---- Inputs (text, number, select) -------------------------------- */
     .stTextInput input,
     .stNumberInput input,
-    div[data-testid="stSidebar"] .stTextInput input,
-    div[data-testid="stSidebar"] .stNumberInput input {
-        background-color: #ffffff;
-        color: #1a202c;
-        border-color: #cbd5e0;
-    }
+    div[data-baseweb="input"] input,
     div[data-baseweb="select"] > div {
-        background-color: #ffffff;
-        color: #1a202c;
-        border-color: #cbd5e0;
+        background-color: #12151c !important;
+        border: 1px solid #232938 !important;
+        border-radius: 6px !important;
+        color: #e5e9f0 !important;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
-    /* Streamlit's info / warning callouts — light-themed background. */
-    div[data-testid="stAlert"] {
-        background-color: #ebf8ff;
-        color: #1a202c;
+    .stTextInput input:focus,
+    .stNumberInput input:focus,
+    div[data-baseweb="input"]:focus-within,
+    div[data-baseweb="select"] > div:focus-within {
+        border-color: #7c8cff !important;
+        box-shadow: 0 0 0 3px rgba(124,140,255,0.15) !important;
+        outline: none !important;
     }
-    /* Site footer (light) */
-    .site-footer {
-        border-top: 1px solid #cbd5e0;
-        margin: 36px auto 0 auto;
-        padding: 18px 12px 28px 12px;
-        text-align: center;
-        color: #4a5568;
+    section[data-testid="stSidebar"] .stTextInput input {
+        font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+        font-size: 0.92rem;
+    }
+    /* Tooltip — constrain width so the help-icon popover doesn't overflow
+       on narrow viewports / sidebar. */
+    div[role="tooltip"] {
+        max-width: 280px !important;
+        white-space: normal !important;
+        word-wrap: break-word !important;
+        background: #1a1f2b !important;
+        border: 1px solid #2f3646 !important;
+        color: #e5e9f0 !important;
+    }
+
+    /* ---- Sliders ------------------------------------------------------- */
+    /* Streamlit's slider track and thumb don't pick up the theme accent
+       reliably across versions — pin them explicitly. */
+    .stSlider [data-baseweb="slider"] [role="slider"] {
+        background-color: #7c8cff !important;
+        border-color: #7c8cff !important;
+    }
+    .stSlider [data-baseweb="slider"] > div > div > div {
+        background-color: #7c8cff !important;
+    }
+
+    /* ---- Buttons ------------------------------------------------------- */
+    .stButton > button {
+        border-radius: 6px;
+        font-weight: 500;
+        font-size: 0.88rem;
+        padding: 0.45rem 0.95rem;
+        transition: all 0.15s ease;
+        border: 1px solid #232938;
+        background-color: #12151c;
+        color: #e5e9f0;
+    }
+    .stButton > button:hover {
+        background-color: #1a1f2b;
+        border-color: #2f3646;
+        color: #ffffff;
+    }
+    .stButton > button[kind="primary"] {
+        background-color: #7c8cff;
+        color: #0b0d12;
+        border: 1px solid #7c8cff;
+        font-weight: 600;
+    }
+    .stButton > button[kind="primary"]:hover {
+        background-color: #95a3ff;
+        border-color: #95a3ff;
+        color: #0b0d12;
+        box-shadow: 0 4px 14px rgba(124,140,255,0.30);
+    }
+    .stDownloadButton > button {
+        border-radius: 6px;
+        background-color: #12151c;
+        border: 1px solid #2f3646;
+        color: #e5e9f0;
+    }
+    .stDownloadButton > button:hover {
+        background-color: #1a1f2b;
+        border-color: #7c8cff;
+        color: #ffffff;
+    }
+
+    /* ---- Tabs ---------------------------------------------------------- */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        border-bottom: 1px solid #1c2230;
+        margin-bottom: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: transparent;
+        border-radius: 6px 6px 0 0;
+        padding: 10px 16px;
+        color: #8b94a8;
+        font-size: 0.88rem;
+        font-weight: 500;
+        border: 1px solid transparent;
+        border-bottom: none;
+        transition: color 0.15s ease, background-color 0.15s ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        color: #e5e9f0;
+        background-color: rgba(124,140,255,0.06);
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #12151c;
+        color: #ffffff;
+        border-color: #1c2230;
+        position: relative;
+    }
+    .stTabs [aria-selected="true"]::after {
+        content: "";
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: -1px;
+        height: 2px;
+        background: #7c8cff;
+        border-radius: 1px;
+    }
+
+    /* ---- Metric cards (the top of Deal Summary) ----------------------- */
+    .metric-card {
+        background: #12151c;
+        border: 1px solid #1c2230;
+        border-radius: 10px;
+        padding: 14px 14px 16px 14px;
+        margin: 0;
+        min-height: 92px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .metric-card:hover {
+        border-color: #2f3646;
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(0,0,0,0.25);
+    }
+    .metric-card h3 {
+        color: #6b7385;
+        font-size: 0.66rem;
+        font-weight: 600;
+        margin: 0 0 8px 0;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .metric-card h2 {
+        color: #ffffff;
+        font-size: 1.55rem;
+        font-weight: 600;
+        margin: 0;
+        white-space: nowrap;
+        letter-spacing: -0.01em;
+        font-feature-settings: "tnum";
+    }
+    .metric-card .positive { color: #4ade80; }
+    .metric-card .negative { color: #f87171; }
+    .metric-card .neutral  { color: #ffffff; }
+    .metric-card .accent   { color: #95a3ff; }
+
+    /* ---- Section headers ---------------------------------------------- */
+    .section-header {
+        color: #e5e9f0;
+        margin: 28px 0 14px 0;
         font-size: 0.78rem;
-        line-height: 1.55;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.10em;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .section-header::before {
+        content: "";
+        width: 3px;
+        height: 14px;
+        background: #7c8cff;
+        border-radius: 2px;
+    }
+
+    /* ---- Streamlit alert callouts ------------------------------------- */
+    div[data-testid="stAlert"] {
+        background-color: #12151c;
+        border: 1px solid #1c2230;
+        border-radius: 8px;
+        color: #e5e9f0;
+    }
+    div[data-testid="stAlert"][data-baseweb="notification"]:has(svg[data-testid="stIconWarning"]),
+    div[data-testid="stAlert"]:has([data-baseweb="icon"][data-testid="stIcon"]) {
+        /* warning state uses a left accent — see narrower selector below */
+    }
+    /* Targeted warning, info, error tints — Streamlit doesn't expose a
+       clean variant class, so we lean on the icon's title for matching. */
+    div[data-testid="stAlertContentWarning"] { color: #e5e9f0 !important; }
+    div[data-testid="stAlertContentInfo"]    { color: #e5e9f0 !important; }
+    div[data-testid="stAlertContentSuccess"] { color: #e5e9f0 !important; }
+    div[data-testid="stAlertContentError"]   { color: #e5e9f0 !important; }
+
+    /* ---- DataFrames --------------------------------------------------- */
+    .stDataFrame, [data-testid="stDataFrame"] {
+        border: 1px solid #1c2230;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    /* ---- Dialogs (reconciliation modal) ------------------------------- */
+    div[role="dialog"] {
+        background-color: #12151c !important;
+        border: 1px solid #232938 !important;
+        border-radius: 12px !important;
+    }
+    div[role="dialog"] h2,
+    div[role="dialog"] [data-testid="stMarkdownContainer"] h2 {
+        /* Long firm names overflow the default title — clamp to two lines
+           with ellipsis, smaller font. */
+        font-size: 1.1rem !important;
+        font-weight: 600 !important;
+        line-height: 1.35 !important;
+        margin: 0 0 8px 0 !important;
+        display: -webkit-box !important;
+        -webkit-line-clamp: 2 !important;
+        -webkit-box-orient: vertical !important;
+        overflow: hidden !important;
+        word-break: break-word !important;
+    }
+
+    /* ---- Radio rows inside the reconciliation dialog ------------------ */
+    div[role="dialog"] .stRadio > div {
+        background-color: #0e1118;
+        border: 1px solid #1c2230;
+        border-radius: 6px;
+        padding: 6px 10px;
+    }
+    div[role="dialog"] .stRadio label {
+        font-size: 0.84rem;
+    }
+
+    /* ---- Site footer -------------------------------------------------- */
+    .site-footer {
+        border-top: 1px solid #1c2230;
+        margin: 56px auto 0 auto;
+        padding: 22px 12px 32px 12px;
+        text-align: center;
+        color: #6b7385;
+        font-size: 0.76rem;
+        line-height: 1.6;
         max-width: 880px;
     }
-    .site-footer a { color: #2b6cb0; text-decoration: none; }
-    .site-footer a:hover { text-decoration: underline; }
-    .site-footer .footer-meta { color: #718096; margin-top: 8px; }
+    .site-footer a { color: #95a3ff; text-decoration: none; }
+    .site-footer a:hover { color: #b6c0ff; text-decoration: underline; }
+    .site-footer .footer-meta {
+        color: #4d5566;
+        margin-top: 10px;
+        font-size: 0.72rem;
+    }
+
+    /* ---- Mega-RIA warning banner ------------------------------------- */
+    .mega-banner {
+        background: linear-gradient(180deg, rgba(251,191,36,0.08) 0%, rgba(251,191,36,0.04) 100%);
+        border: 1px solid rgba(251,191,36,0.35);
+        border-left: 3px solid #fbbf24;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 8px 0 16px 0;
+        color: #e5e9f0;
+        font-size: 0.86rem;
+        line-height: 1.55;
+    }
+    .mega-banner strong { color: #fbbf24; }
+
+    /* ---- Mobile / narrow viewport ------------------------------------ */
+    @media (max-width: 640px) {
+        .metric-card { min-height: 78px; padding: 10px; }
+        .metric-card h2 { font-size: 1.2rem; }
+        .section-header { font-size: 0.72rem; }
+        .stTabs [data-baseweb="tab"] { padding: 8px 10px; font-size: 0.8rem; }
+    }
 </style>
 """
 
-
-def _is_light() -> bool:
-    return st.session_state.get("theme", "dark") == "light"
-
-
-# Inject the active theme's CSS.
-st.markdown(_LIGHT_CSS if _is_light() else _DARK_CSS, unsafe_allow_html=True)
+st.markdown(_THEME_CSS, unsafe_allow_html=True)
 
 
 def render_site_footer():
-    """Render the site footer. Safe to call on both the welcome page and
-    the calculator page; the .site-footer class adapts to the active theme."""
+    """Render the site footer. Single dark-theme styling lives in the
+    .site-footer rule in the global stylesheet."""
     sec_url = (
         "https://www.sec.gov/data-research/sec-markets-data/"
         "information-about-registered-investment-advisers-exempt-reporting-advisers"
@@ -479,11 +540,6 @@ def render_site_footer():
         """,
         unsafe_allow_html=True,
     )
-
-
-def _toggle_theme():
-    """Callback for the theme switch button — flip dark <-> light."""
-    st.session_state.theme = "light" if st.session_state.get("theme", "dark") == "dark" else "dark"
 
 
 # -- Session state -------------------------------------------------------------
@@ -604,31 +660,26 @@ def _apply_pending():
     st.session_state.pending_apply.clear()
 
 def plotly_layout() -> dict:
-    """Return the Plotly layout kwargs for the currently active theme.
-
-    Replaces a previous module-level PLOTLY_LAYOUT constant so charts re-render
-    correctly when the user toggles dark/light mode mid-session."""
-    if _is_light():
-        return dict(
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(247,250,252,0.9)",
-            font=dict(color="#1a202c", size=12),
-            xaxis=dict(gridcolor="#e2e8f0", zerolinecolor="#cbd5e0"),
-            yaxis=dict(gridcolor="#e2e8f0", zerolinecolor="#cbd5e0"),
-            margin=dict(l=40, r=40, t=50, b=40),
-            legend=dict(bgcolor="rgba(0,0,0,0)"),
-        )
+    """Return the Plotly layout kwargs for the dark theme. Function (not
+    constant) so calling sites can still pass it as **kwargs; kept as a
+    function in case we ever reintroduce theme variants."""
+    # NB: callers pass their own `title=...` kwarg via update_layout, so we
+    # must NOT include `title` here (would collide with multiple kwargs).
+    # Plotly's default title font color follows the figure font color set
+    # below — same effect with no kwarg collision.
     return dict(
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(26,31,46,0.8)",
-        font=dict(color="#e2e8f0", size=12),
-        xaxis=dict(gridcolor="#2d3748", zerolinecolor="#2d3748"),
-        yaxis=dict(gridcolor="#2d3748", zerolinecolor="#2d3748"),
+        plot_bgcolor="rgba(18,21,28,0.6)",
+        font=dict(color="#e5e9f0", size=12, family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"),
+        xaxis=dict(gridcolor="#1c2230", zerolinecolor="#232938", linecolor="#232938"),
+        yaxis=dict(gridcolor="#1c2230", zerolinecolor="#232938", linecolor="#232938"),
         margin=dict(l=40, r=40, t=50, b=40),
-        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color="#c5cad6")),
     )
 
-COLORS = ["#4a90d9", "#48bb78", "#ed8936", "#fc8181", "#9f7aea", "#63b3ed"]
+# Indigo / green / amber / red / violet / cyan — matches the .metric-card colors
+# and the CSS accent system in _THEME_CSS.
+COLORS = ["#7c8cff", "#4ade80", "#fbbf24", "#f87171", "#c084fc", "#67e8f9"]
 
 
 # -- Helpers -------------------------------------------------------------------
@@ -656,181 +707,207 @@ def metric_card(label, value, css_class="neutral"):
 
 
 def render_welcome_page():
-    """Render the welcome/landing page with sidebar hidden."""
-    # Theme toggle, top-right. Placed BEFORE the welcome container so the
-    # absolute hero block can't cover it. Use a 3-column trick to right-align.
-    _wl, _wm, _wr = st.columns([8, 1, 1])
-    with _wr:
-        _icon = "☀️" if _is_light() else "🌙"
-        st.button(
-            _icon,
-            key="welcome_theme_toggle",
-            on_click=_toggle_theme,
-            help="Toggle day/dark mode",
-            use_container_width=True,
-        )
-
-    _light = _is_light()
-    _bg_card = "#ffffff" if _light else "#1a1f2e"
-    _border_card = "#cbd5e0" if _light else "#2d3748"
-    _h1_color = "#1a202c" if _light else "#e2e8f0"
-    _subtitle_color = "#4a5568" if _light else "#8b95a5"
-    _divider_color = "#2b6cb0" if _light else "#4a90d9"
-    _card_h3 = "#1a202c" if _light else "#e2e8f0"
-    _card_p = "#4a5568" if _light else "#6b7280"
-    st.markdown(f"""
+    """Render the welcome/landing page with the sidebar hidden. Dark-theme only."""
+    st.markdown("""
     <style>
-        [data-testid="stSidebar"] {{ display: none; }}
-        [data-testid="stSidebarCollapsedControl"] {{ display: none; }}
-        .welcome-container {{
-            max-width: 880px;
+        [data-testid="stSidebar"] { display: none; }
+        [data-testid="stSidebarCollapsedControl"] { display: none; }
+        .block-container { padding-top: 3.5rem !important; }
+
+        .welcome-container {
+            max-width: 940px;
             margin: 0 auto;
-            padding: 20px 20px 40px 20px;
-        }}
-        .welcome-header {{
+            padding: 8px 20px 40px 20px;
+        }
+        .welcome-eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 12px;
+            background: rgba(124,140,255,0.10);
+            border: 1px solid rgba(124,140,255,0.30);
+            border-radius: 999px;
+            color: #95a3ff;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 20px;
+        }
+        .welcome-eyebrow .dot {
+            width: 6px; height: 6px; border-radius: 50%;
+            background: #7c8cff; box-shadow: 0 0 0 3px rgba(124,140,255,0.20);
+        }
+        .welcome-header {
             text-align: center;
-            margin-bottom: 48px;
-        }}
-        .welcome-header h1 {{
-            color: {_h1_color};
-            font-size: 2.4rem;
+            margin-bottom: 56px;
+        }
+        .welcome-header h1 {
+            color: #ffffff;
+            font-size: 3.2rem;
             font-weight: 700;
-            letter-spacing: -0.02em;
-            margin-bottom: 12px;
-            line-height: 1.2;
-        }}
-        .welcome-header .subtitle {{
-            color: {_subtitle_color};
-            font-size: 1.05rem;
+            letter-spacing: -0.03em;
+            margin: 0 0 16px 0;
+            line-height: 1.05;
+            background: linear-gradient(180deg, #ffffff 0%, #c5cad6 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        @media (max-width: 640px) {
+            .welcome-header h1 { font-size: 2.2rem; }
+        }
+        .welcome-header .subtitle {
+            color: #8b94a8;
+            font-size: 1.08rem;
             font-weight: 400;
             line-height: 1.6;
-            max-width: 560px;
+            max-width: 580px;
             margin: 0 auto;
-        }}
-        .welcome-divider {{
-            width: 48px;
-            height: 2px;
-            background-color: {_divider_color};
-            margin: 20px auto;
-        }}
-        .feature-grid {{
+        }
+        .welcome-header .subtitle strong { color: #e5e9f0; font-weight: 500; }
+
+        .feature-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
             gap: 14px;
             margin-bottom: 48px;
-        }}
-        @media (max-width: 768px) {{
-            .feature-grid {{ grid-template-columns: repeat(2, 1fr); }}
-        }}
-        @keyframes cardFadeUp {{
-            from {{ opacity: 0; transform: translateY(18px); }}
-            to {{ opacity: 1; transform: translateY(0); }}
-        }}
-        .feature-card {{
-            background: {_bg_card};
-            border: 1px solid {_border_card};
-            border-radius: 8px;
-            padding: 22px 18px;
-            transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
-            animation: cardFadeUp 0.5s ease both;
-        }}
-        .feature-card:nth-child(1) {{ animation-delay: 0.05s; }}
-        .feature-card:nth-child(2) {{ animation-delay: 0.12s; }}
-        .feature-card:nth-child(3) {{ animation-delay: 0.19s; }}
-        .feature-card:nth-child(4) {{ animation-delay: 0.26s; }}
-        .feature-card:nth-child(5) {{ animation-delay: 0.33s; }}
-        .feature-card:nth-child(6) {{ animation-delay: 0.40s; }}
-        .feature-card:hover {{
-            transform: translateY(-3px);
-            box-shadow: 0 8px 24px rgba(0,0,0,0.18);
-        }}
-        .feature-card.fc-blue:hover   {{ border-color: #4a90d9; }}
-        .feature-card.fc-green:hover  {{ border-color: #48bb78; }}
-        .feature-card.fc-amber:hover  {{ border-color: #ed8936; }}
-        .feature-card.fc-purple:hover {{ border-color: #9f7aea; }}
-        .feature-card.fc-cyan:hover   {{ border-color: #63b3ed; }}
-        .feature-card.fc-rose:hover   {{ border-color: #f687b3; }}
-        .feature-icon {{
-            width: 32px;
-            height: 32px;
+        }
+        @media (max-width: 768px) {
+            .feature-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 480px) {
+            .feature-grid { grid-template-columns: 1fr; }
+        }
+        @keyframes cardFadeUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .feature-card {
+            background: #12151c;
+            border: 1px solid #1c2230;
+            border-radius: 10px;
+            padding: 20px 18px;
+            transition: transform 0.20s ease, border-color 0.20s ease, box-shadow 0.20s ease;
+            animation: cardFadeUp 0.45s ease both;
+        }
+        .feature-card:nth-child(1) { animation-delay: 0.02s; }
+        .feature-card:nth-child(2) { animation-delay: 0.06s; }
+        .feature-card:nth-child(3) { animation-delay: 0.10s; }
+        .feature-card:nth-child(4) { animation-delay: 0.14s; }
+        .feature-card:nth-child(5) { animation-delay: 0.18s; }
+        .feature-card:nth-child(6) { animation-delay: 0.22s; }
+        .feature-card:hover {
+            transform: translateY(-2px);
+            border-color: #2f3646;
+            box-shadow: 0 10px 26px rgba(0,0,0,0.30);
+        }
+        .feature-icon {
+            width: 30px;
+            height: 30px;
             border-radius: 6px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 0.9rem;
-            margin-bottom: 12px;
-        }}
-        .fi-blue   {{ background: rgba(74,144,217,0.15); color: #4a90d9; }}
-        .fi-green  {{ background: rgba(72,187,120,0.15); color: #48bb78; }}
-        .fi-amber  {{ background: rgba(237,137,54,0.15); color: #ed8936; }}
-        .fi-purple {{ background: rgba(159,122,234,0.15); color: #9f7aea; }}
-        .fi-cyan   {{ background: rgba(99,179,237,0.15); color: #63b3ed; }}
-        .fi-rose   {{ background: rgba(246,135,179,0.15); color: #f687b3; }}
-        .feature-card h3 {{
-            color: {_card_h3};
             font-size: 0.88rem;
+            margin-bottom: 14px;
+            background: rgba(124,140,255,0.10);
+            color: #95a3ff;
+        }
+        .feature-card h3 {
+            color: #ffffff;
+            font-size: 0.92rem;
             font-weight: 600;
-            margin-bottom: 6px;
-        }}
-        .feature-card p {{
-            color: {_card_p};
-            font-size: 0.78rem;
-            line-height: 1.5;
+            margin: 0 0 6px 0;
+        }
+        .feature-card p {
+            color: #8b94a8;
+            font-size: 0.82rem;
+            line-height: 1.55;
             margin: 0;
-        }}
+        }
+
+        .cta-row {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 28px;
+        }
+        .cta-hint {
+            text-align: center;
+            color: #6b7385;
+            font-size: 0.78rem;
+            margin-bottom: 32px;
+        }
+        .cta-hint kbd {
+            background: #12151c;
+            border: 1px solid #232938;
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 0.72rem;
+            color: #c5cad6;
+            font-family: 'SF Mono', 'Consolas', monospace;
+        }
     </style>
     """, unsafe_allow_html=True)
 
     st.markdown("""
     <div class="welcome-container">
         <div class="welcome-header">
-            <h1>RIA M&A Calculator</h1>
-            <div class="welcome-divider"></div>
+            <div class="welcome-eyebrow"><span class="dot"></span>RIA M&amp;A Toolkit</div>
+            <h1>Model the deal before<br>you make the offer.</h1>
             <p class="subtitle">
-                Buyer-side acquisition modeling for Registered Investment Advisors.
-                Structure deals, model financing, and stress-test returns.
+                Buyer-side acquisition economics for Registered Investment Advisors.
+                Structure consideration, stress-test returns, and pressure-check financing &mdash;
+                with live SEC Form ADV auto-fill for <strong>~16K registered firms</strong>.
             </p>
         </div>
         <div class="feature-grid">
-            <div class="feature-card fc-blue">
-                <div class="feature-icon fi-blue">&#9670;</div>
+            <div class="feature-card">
+                <div class="feature-icon">&#9670;</div>
                 <h3>Deal Structuring</h3>
-                <p>Model upfront cash, seller notes, earnouts, and equity rollover splits</p>
+                <p>Upfront cash, seller notes, earnouts, and equity rollover splits</p>
             </div>
-            <div class="feature-card fc-green">
-                <div class="feature-icon fi-green">&#9638;</div>
-                <h3>Pro Forma Analysis</h3>
-                <p>5-year P&L with revenue growth, attrition, and cost synergies</p>
+            <div class="feature-card">
+                <div class="feature-icon">&#9638;</div>
+                <h3>Pro Forma P&amp;L</h3>
+                <p>5-year forecast with growth, attrition, and cost synergies</p>
             </div>
-            <div class="feature-card fc-amber">
-                <div class="feature-icon fi-amber">&#9686;</div>
+            <div class="feature-card">
+                <div class="feature-icon">&#9686;</div>
                 <h3>Return Metrics</h3>
-                <p>IRR, cash-on-cash, breakeven analysis, and DSCR tracking</p>
+                <p>IRR, cash-on-cash, breakeven year, and DSCR by year</p>
             </div>
-            <div class="feature-card fc-purple">
-                <div class="feature-icon fi-purple">&#9649;</div>
+            <div class="feature-card">
+                <div class="feature-icon">&#9649;</div>
                 <h3>Sensitivity Tables</h3>
-                <p>Two-way heatmaps across multiples, growth, and attrition scenarios</p>
+                <p>Two-way heatmaps across multiple, growth, and attrition</p>
             </div>
-            <div class="feature-card fc-cyan">
-                <div class="feature-icon fi-cyan">&#9655;</div>
+            <div class="feature-card">
+                <div class="feature-icon">&#9655;</div>
                 <h3>Earnout Modeling</h3>
-                <p>Floor, cap, cliff vesting, and multi-metric performance thresholds</p>
+                <p>Floor, cap, cliff vesting, and revenue/AUM/client metrics</p>
             </div>
-            <div class="feature-card fc-rose">
-                <div class="feature-icon fi-rose">&#9744;</div>
+            <div class="feature-card">
+                <div class="feature-icon">&#9744;</div>
                 <h3>Debt Analysis</h3>
-                <p>Amortization schedules with I/O periods, balloon payments, and standstill terms</p>
+                <p>Amortization with I/O periods, balloons, and standstill terms</p>
             </div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    _col1, col_btn, _col3 = st.columns([1, 1, 1])
+    _l, col_btn, _r = st.columns([1, 1, 1])
     with col_btn:
-        if st.button("Open Calculator", type="primary", use_container_width=True):
+        if st.button("Open the calculator  →", type="primary", use_container_width=True):
             st.session_state.show_calculator = True
             st.rerun()
+
+    st.markdown(
+        '<div class="cta-hint">No sign-up. Inputs are session-only. '
+        'Free SEC ADV lookups for ~16K registered RIAs.</div>',
+        unsafe_allow_html=True,
+    )
 
     render_site_footer()
 
@@ -840,74 +917,77 @@ def render_instructions_tab():
     st.markdown("""
     <style>
         .guide-card {
-            background: #1a1f2e;
-            border: 1px solid #2d3748;
-            border-radius: 8px;
-            padding: 24px;
-            margin-bottom: 16px;
+            background: #12151c;
+            border: 1px solid #1c2230;
+            border-radius: 10px;
+            padding: 22px 24px;
+            margin-bottom: 14px;
         }
         .guide-card h3 {
-            color: #e2e8f0;
-            font-size: 1rem;
+            color: #ffffff;
+            font-size: 0.98rem;
             font-weight: 600;
             margin-bottom: 14px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid #2d3748;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #1c2230;
         }
         .guide-card p, .guide-card li {
-            color: #a0aec0;
+            color: #a0a8ba;
             font-size: 0.86rem;
-            line-height: 1.7;
+            line-height: 1.65;
         }
-        .guide-card strong { color: #e2e8f0; }
+        .guide-card strong { color: #e5e9f0; }
         .guide-card code {
-            background: #0e1117;
-            color: #4a90d9;
+            background: #0b0d12;
+            color: #95a3ff;
             padding: 2px 6px;
-            border-radius: 3px;
+            border-radius: 4px;
             font-size: 0.8rem;
+            border: 1px solid #1c2230;
         }
         .step-row {
             display: flex;
             align-items: flex-start;
             gap: 14px;
-            margin-bottom: 16px;
+            margin-bottom: 14px;
         }
         .step-num {
             flex-shrink: 0;
-            width: 28px;
-            height: 28px;
-            background: #4a90d9;
-            color: #0e1117;
+            width: 26px;
+            height: 26px;
+            background: rgba(124,140,255,0.15);
+            color: #95a3ff;
+            border: 1px solid rgba(124,140,255,0.35);
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-weight: 700;
-            font-size: 0.8rem;
-            margin-top: 2px;
+            font-weight: 600;
+            font-size: 0.78rem;
+            margin-top: 1px;
         }
         .step-content { flex: 1; }
-        .step-content strong { color: #e2e8f0; }
+        .step-content strong { color: #e5e9f0; }
         .step-content p {
-            color: #a0aec0;
+            color: #a0a8ba;
             font-size: 0.86rem;
             line-height: 1.6;
             margin: 0;
         }
         .scenario-box {
-            background: linear-gradient(135deg, #1a1f2e 0%, #16192b 100%);
-            border-radius: 8px;
-            padding: 24px;
-            margin-bottom: 16px;
+            background: #12151c;
+            border: 1px solid #1c2230;
+            border-radius: 10px;
+            padding: 22px 24px;
+            margin-bottom: 14px;
         }
         .scenario-box h4 {
             font-size: 0.95rem;
             font-weight: 600;
             margin-bottom: 16px;
         }
-        .scenario-blue h4 { color: #4a90d9; border-left: 3px solid #4a90d9; padding-left: 12px; }
-        .scenario-green h4 { color: #48bb78; border-left: 3px solid #48bb78; padding-left: 12px; }
+        .scenario-blue h4 { color: #95a3ff; border-left: 3px solid #7c8cff; padding-left: 12px; }
+        .scenario-green h4 { color: #4ade80; border-left: 3px solid #4ade80; padding-left: 12px; }
         .scenario-box table {
             width: 100%;
             border-collapse: collapse;
@@ -915,52 +995,52 @@ def render_instructions_tab():
         }
         .scenario-box th {
             text-align: left;
-            color: #8b95a5;
-            font-size: 0.72rem;
+            color: #6b7385;
+            font-size: 0.70rem;
             font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.06em;
             padding: 6px 10px;
-            border-bottom: 1px solid #2d3748;
+            border-bottom: 1px solid #1c2230;
         }
         .scenario-box td {
-            color: #e2e8f0;
+            color: #e5e9f0;
             font-size: 0.84rem;
-            padding: 6px 10px;
-            border-bottom: 1px solid rgba(45,55,72,0.5);
+            padding: 7px 10px;
+            border-bottom: 1px solid rgba(28,34,48,0.7);
         }
         .scenario-box .note {
-            color: #8b95a5;
-            font-size: 0.78rem;
+            color: #8b94a8;
+            font-size: 0.80rem;
             font-style: italic;
-            line-height: 1.6;
+            line-height: 1.65;
             margin-top: 8px;
         }
         .nav-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-            margin-top: 12px;
+            gap: 10px;
+            margin-top: 8px;
         }
         @media (max-width: 768px) {
             .nav-grid { grid-template-columns: 1fr; }
         }
         .nav-item {
-            background: #0e1117;
-            border: 1px solid #2d3748;
+            background: #0e1118;
+            border: 1px solid #1c2230;
             border-radius: 6px;
-            padding: 14px 16px;
+            padding: 12px 14px;
         }
         .nav-item strong {
-            color: #e2e8f0;
-            font-size: 0.84rem;
+            color: #ffffff;
+            font-size: 0.85rem;
             display: block;
             margin-bottom: 4px;
         }
         .nav-item span {
-            color: #6b7280;
-            font-size: 0.76rem;
-            line-height: 1.5;
+            color: #8b94a8;
+            font-size: 0.78rem;
+            line-height: 1.55;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -1283,18 +1363,38 @@ if not _sec_source_caption_rendered:
 # it's anchored to the lookup widget, not Target Firm.
 if st.session_state.sec_data is not None:
     _sec = st.session_state.sec_data
-    _as_of = f" — as of {_sec.as_of_date}" if _sec.as_of_date else ""
-    st.sidebar.caption(f"📄 SEC: **{_sec.firm_name}**{_as_of}")
+    _as_of = f" · as of {_sec.as_of_date}" if _sec.as_of_date else ""
+    # Custom-styled chip so the loaded-firm state reads as a callout (not a
+    # caption lost between other captions).
+    st.sidebar.markdown(
+        f"""
+        <div style="background: rgba(74,222,128,0.06);
+                    border: 1px solid rgba(74,222,128,0.30);
+                    border-radius: 6px;
+                    padding: 8px 10px;
+                    margin: 4px 0 6px 0;
+                    font-size: 0.78rem;
+                    color: #c5cad6;
+                    line-height: 1.4;">
+            <span style="color:#4ade80; font-weight:600;">● SEC loaded</span><br>
+            <span style="color:#e5e9f0;">{_sec.firm_name}</span>
+            <span style="color:#6b7385; font-size:0.72rem;">{_as_of}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     # "Report incorrect data" mailto. urllib.parse.quote handles ampersands,
     # accents, etc. in firm names so the subject line stays well-formed.
     _report_subject = urllib.parse.quote(
         f"ADV data issue: {_sec.firm_name} (CRD {_sec.crd})"
     )
     st.sidebar.markdown(
-        f"<small>[Report incorrect data](mailto:dhruvjani7@gmail.com?subject={_report_subject})</small>",
+        f"<div style='font-size:0.72rem; margin: -2px 0 6px 0;'>"
+        f"<a href='mailto:dhruvjani7@gmail.com?subject={_report_subject}' "
+        f"style='color:#8b94a8;'>Report incorrect data</a></div>",
         unsafe_allow_html=True,
     )
-    if st.sidebar.button("Clear SEC data", key="sec_clear_btn"):
+    if st.sidebar.button("Clear SEC data", key="sec_clear_btn", use_container_width=True):
         st.session_state.sec_data = None
         st.session_state.pending_reconcile = False
         st.rerun()
@@ -1396,8 +1496,19 @@ def _render_reconcile_dialog():
     if sec is None:
         return
 
-    @st.dialog(f"Apply SEC data: {sec.firm_name}")
+    # Truncate the title so long firm names ("Edelman Financial Engines, LLC")
+    # don't overflow Streamlit's modal title. The full name lives in the
+    # subtitle below.
+    _short_name = sec.firm_name if len(sec.firm_name) <= 42 else sec.firm_name[:40].rstrip(" ,.") + "…"
+
+    @st.dialog(f"Apply SEC data — {_short_name}")
     def _dlg():
+        # Full firm name + as-of date in a single subtitle line.
+        st.markdown(
+            f"<div style='color:#c5cad6; font-size:0.92rem; font-weight:500; "
+            f"margin: -4px 0 4px 0;'>{sec.firm_name}</div>",
+            unsafe_allow_html=True,
+        )
         st.caption(
             f"Filing as of {sec.as_of_date or 'unknown'}. "
             f"Each field defaults to **Keep mine** — flip to SEC only for fields "
@@ -1708,42 +1819,50 @@ seller_proceeds = compute_seller_total_proceeds(
 # ==============================================================================
 # MAIN PANEL
 # ==============================================================================
-_hdr_left, _hdr_theme, _hdr_right = st.columns([5, 1, 1])
+_hdr_left, _hdr_right = st.columns([6, 1])
 with _hdr_left:
-    st.markdown("# RIA M&A Calculator")
-    st.markdown("*Buyer-side acquisition economics for Registered Investment Advisors*")
-with _hdr_theme:
-    st.markdown("<br>", unsafe_allow_html=True)
-    _theme_icon = "☀️" if _is_light() else "🌙"
-    st.button(
-        _theme_icon,
-        key="calc_theme_toggle",
-        on_click=_toggle_theme,
-        help="Toggle day/dark mode",
-        use_container_width=True,
+    st.markdown(
+        """
+        <div style="margin: 0 0 6px 0;">
+            <div style="font-size: 1.75rem; font-weight: 700; color: #ffffff;
+                        letter-spacing: -0.02em; line-height: 1.15;">
+                RIA M&amp;A Calculator
+            </div>
+            <div style="font-size: 0.92rem; color: #8b94a8; margin-top: 4px;">
+                Buyer-side acquisition economics for Registered Investment Advisors
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 with _hdr_right:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("Home", key="back_home", use_container_width=True):
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    if st.button("← Home", key="back_home", use_container_width=True):
         st.session_state.show_calculator = False
         st.rerun()
 
 # Out-of-scope warning for mega-RIAs. When AUM > $10B the revenue proxy is
 # disabled (fee structures vary too much) so we couldn't auto-scale the
 # purchase price either — the analytics below would render as ~0 against
-# the default $8M. Flag it loudly so the user knows to enter a realistic
-# deal size or switch to the "Select Multiple" purchase-price method.
+# the default $8M. Custom .mega-banner (vs st.warning's loud yellow block)
+# is prominent without being alarmist.
 if st.session_state.sec_data is not None and st.session_state.sec_data.aum > 10e9:
-    st.warning(
-        f"**{st.session_state.sec_data.firm_name}** ({fmt_dollar(st.session_state.sec_data.aum)} AUM) "
-        "is above this calculator's typical deal-size range "
-        "(~\\$100M–\\$10B AUM). Revenue and purchase price weren't auto-scaled — "
-        "enter a realistic deal size in the sidebar before reading the analytics."
+    _mega = st.session_state.sec_data
+    st.markdown(
+        f"""
+        <div class="mega-banner">
+            <strong>Heads up &mdash;</strong> {_mega.firm_name}
+            ({fmt_dollar(_mega.aum)} AUM) is above this calculator&rsquo;s typical
+            deal-size range (~\\$100M&ndash;\\$10B AUM). Revenue and purchase price
+            weren&rsquo;t auto-scaled. Enter a realistic deal size in the sidebar
+            before reading the analytics.
+        </div>
+        """.replace("\\$", "$"),
+        unsafe_allow_html=True,
     )
 
 # Compliance disclaimer — small but always visible above the tabs so a user
-# evaluating output never has to hunt for it. st.caption is unobtrusive vs.
-# st.info, which would compete with the tab nav for attention.
+# evaluating output never has to hunt for it.
 st.caption(
     "Estimates derived from SEC Form ADV public filings. Not investment advice. "
     "Revenue estimated at 0.75% of AUM — actual figures vary by fee structure."
@@ -1762,7 +1881,9 @@ with tab1:
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.markdown(metric_card("Price", fmt_dollar(purchase_price), "neutral"), unsafe_allow_html=True)
+        # Price is the user's anchor — render with accent color so the eye
+        # lands there first across the row.
+        st.markdown(metric_card("Price", fmt_dollar(purchase_price), "accent"), unsafe_allow_html=True)
     with c2:
         st.markdown(metric_card("Rev Multiple", f"{multiples['revenue_multiple']:.2f}x", "neutral"), unsafe_allow_html=True)
     with c3:

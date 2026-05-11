@@ -15,6 +15,7 @@ from calculations import (
     suggest_deal_structure,
     compute_earnout_scenarios, compute_seller_total_proceeds,
     sensitivity_irr, sensitivity_breakeven,
+    compute_synergy_schedule,
 )
 import sec_lookup
 import tempfile
@@ -1749,6 +1750,15 @@ st.sidebar.markdown("---")
 
 # -- Integration ---------------------------------------------------------------
 st.sidebar.markdown("### Integration Assumptions")
+st.sidebar.caption(
+    "Full framework lives in the Integration Strategy tab. "
+    "Toggle below to override with flat values."
+)
+use_manual_integration = st.sidebar.checkbox(
+    "Manual override (flat inputs)", value=False, key="manual_integration",
+    help="If on, use the flat synergy/cost inputs below. If off, the "
+         "ramped Part-E schedule from the Integration Strategy tab is used.",
+)
 integration_costs = currency_input("One-Time Integration Costs ($)", 150_000, "integration")
 annual_synergies = currency_input("Expected Annual Cost Synergies ($)", 100_000, "synergies")
 additional_staff = st.sidebar.number_input("Additional Staff Needed", value=1, min_value=0, max_value=10)
@@ -1798,6 +1808,34 @@ suggested_deal = suggest_deal_structure(
     aum=aum, pct_recurring=pct_recurring, growth_rate=rev_growth,
 )
 
+# --- Integration synergy schedule (banker-MD memo Part E) ---------------------
+# Defaults live in session_state so the Integration Strategy tab can update
+# them and the pro forma re-renders on next run. If manual override is on,
+# pass None to build_pro_forma and it falls back to the flat inputs.
+_default_expense_base = max(0.0, float(annual_revenue) - float(ebitda))
+_int_expense_base = st.session_state.get("int_expense_base", _default_expense_base)
+_int_cost_takeout_pct = st.session_state.get("int_cost_takeout_pct", 0.14)
+_int_revenue_uplift_pct = st.session_state.get("int_revenue_uplift_pct", 0.07)
+_int_capture_multiple = st.session_state.get("int_capture_multiple", 1.25)
+_int_buyer_profile = {
+    "has_compliance_team": st.session_state.get("int_buyer_compliance", True),
+    "has_tech_stack": st.session_state.get("int_buyer_tech", True),
+    "has_planning_shop": st.session_state.get("int_buyer_planning", False),
+    "has_back_office": st.session_state.get("int_buyer_backoffice", True),
+    "has_cco_redundancy": st.session_state.get("int_buyer_cco", False),
+}
+
+synergy_schedule = compute_synergy_schedule(
+    target_revenue=annual_revenue,
+    target_expense_base=_int_expense_base,
+    buyer_profile=_int_buyer_profile,
+    cost_takeout_pct=_int_cost_takeout_pct,
+    revenue_uplift_pct=_int_revenue_uplift_pct,
+    capture_cost_multiple=_int_capture_multiple,
+    years=7,
+)
+_active_synergy_schedule = None if use_manual_integration else synergy_schedule
+
 pro_forma = build_pro_forma(
     revenue=annual_revenue, ebitda=ebitda, owner_comp=owner_comp,
     growth_rate=rev_growth, attrition_rate=attrition_rate, aum=aum,
@@ -1816,6 +1854,7 @@ pro_forma = build_pro_forma(
     noncompete_total=noncompete_total, noncompete_years=noncompete_years,
     tax_rate=tax_rate,
     replacement_cost=replacement_cost,
+    synergy_schedule=_active_synergy_schedule,
 )
 
 # Build schedules separately so they can be passed into compute_irr_and_returns
@@ -2221,6 +2260,7 @@ with tab3:
         consulting_annual=consulting_annual, consulting_years=consulting_years,
         noncompete_total=noncompete_total, noncompete_years=noncompete_years,
         tax_rate=tax_rate,
+        synergy_schedule=_active_synergy_schedule,
     )
 
     st.markdown('<div class="section-header">IRR Sensitivity: Revenue Multiple vs. Client Attrition</div>', unsafe_allow_html=True)
@@ -2439,6 +2479,232 @@ with tab5:
         st.plotly_chart(fig_dscr, use_container_width=True)
     else:
         st.info("No debt service to analyze.")
+
+
+# ==============================================================================
+# TAB 7 -- Integration Strategy (banker-MD memo, Part E)
+# ==============================================================================
+with tab7:
+    st.markdown(
+        '<div class="section-header">Integration Strategy & Synergy Framework</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Models synergy realization as a real ramp curve (banker-MD memo, Part E): "
+        "cost takeout from buyer-target overlap, revenue uplift from fee "
+        "harmonization and wallet share, less one-time capture cost. Default "
+        "assumptions reflect a $500M-AUM target tucked into a $1B+ buyer."
+    )
+
+    if use_manual_integration:
+        st.warning(
+            "Manual override is ON in the sidebar. The pro forma is currently "
+            "using the flat integration_costs / annual_synergies inputs, not "
+            "this schedule. Toggle it off to apply the framework."
+        )
+
+    # ---- Inputs ----
+    # Streamlit forbids passing BOTH value= and a key= that's already in
+    # session_state. We use widget-specific keys (_w_*) and write the canonical
+    # value back to the shared session_state key after the widget renders.
+    st.markdown("#### Inputs")
+    in1, in2 = st.columns(2)
+    with in1:
+        st.markdown("**Target firm**")
+        _auto_expense = max(0.0, float(annual_revenue) - float(ebitda))
+        _default_exp = int(st.session_state.get("int_expense_base", _auto_expense))
+        _int_expense_base_w = st.number_input(
+            "Target expense base ($)",
+            value=_default_exp,
+            min_value=0,
+            step=50_000,
+            key="_w_int_expense_base",
+            help="Defaults to revenue minus EBITDA. Override if the target's "
+                 "reported expenses differ from the implied figure.",
+        )
+        st.session_state["int_expense_base"] = _int_expense_base_w
+        st.caption(f"Auto-computed default: ${_auto_expense:,.0f} "
+                   f"(revenue minus EBITDA)")
+    with in2:
+        st.markdown("**Buyer profile** (drives capability factor)")
+        _bp_compliance = st.checkbox(
+            "Has compliance team (CCO/legal redundancy)",
+            value=st.session_state.get("int_buyer_compliance", True),
+            key="_w_int_buyer_compliance")
+        _bp_tech = st.checkbox(
+            "Has overlapping tech stack",
+            value=st.session_state.get("int_buyer_tech", True),
+            key="_w_int_buyer_tech")
+        _bp_backoffice = st.checkbox(
+            "Has back-office ops to absorb",
+            value=st.session_state.get("int_buyer_backoffice", True),
+            key="_w_int_buyer_backoffice")
+        _bp_planning = st.checkbox(
+            "Has planning shop (drives wallet share)",
+            value=st.session_state.get("int_buyer_planning", False),
+            key="_w_int_buyer_planning")
+        _bp_cco = st.checkbox(
+            "Has CCO-level redundancy",
+            value=st.session_state.get("int_buyer_cco", False),
+            key="_w_int_buyer_cco")
+        st.session_state["int_buyer_compliance"] = _bp_compliance
+        st.session_state["int_buyer_tech"] = _bp_tech
+        st.session_state["int_buyer_backoffice"] = _bp_backoffice
+        st.session_state["int_buyer_planning"] = _bp_planning
+        st.session_state["int_buyer_cco"] = _bp_cco
+
+    sl1, sl2, sl3 = st.columns(3)
+    with sl1:
+        _cot = st.slider(
+            "Cost takeout (% of target expense base)",
+            min_value=10.0, max_value=18.0,
+            value=float(st.session_state.get("int_cost_takeout_pct", 0.14)) * 100,
+            step=0.5, key="_w_int_cost_takeout_pct",
+            help="Banker range 10-18%. Compliance/legal, tech stack, office, "
+                 "back-office. 50-70% of addressable is realistic capture.",
+        ) / 100
+        st.session_state["int_cost_takeout_pct"] = _cot
+    with sl2:
+        _rev = st.slider(
+            "Revenue uplift (% of target revenue)",
+            min_value=5.0, max_value=10.0,
+            value=float(st.session_state.get("int_revenue_uplift_pct", 0.07)) * 100,
+            step=0.5, key="_w_int_revenue_uplift_pct",
+            help="Banker range 5-10% by Y3. Fee-rate harmonization, "
+                 "wallet share, brand-referral lift.",
+        ) / 100
+        st.session_state["int_revenue_uplift_pct"] = _rev
+    with sl3:
+        _cap = st.slider(
+            "Capture cost multiple (x annual run-rate)",
+            min_value=1.0, max_value=1.5,
+            value=float(st.session_state.get("int_capture_multiple", 1.25)),
+            step=0.05, key="_w_int_capture_multiple",
+            help="One-time integration cost as a multiple of annual run-rate "
+                 "synergy. Spread 60/30/10 across Y1-Y3.",
+        )
+        st.session_state["int_capture_multiple"] = _cap
+
+    # Rebuild for this tab's display.
+    _live_buyer_profile = {
+        "has_compliance_team": _bp_compliance,
+        "has_tech_stack": _bp_tech,
+        "has_planning_shop": _bp_planning,
+        "has_back_office": _bp_backoffice,
+        "has_cco_redundancy": _bp_cco,
+    }
+    schedule = compute_synergy_schedule(
+        target_revenue=annual_revenue,
+        target_expense_base=_int_expense_base_w,
+        buyer_profile=_live_buyer_profile,
+        cost_takeout_pct=_cot,
+        revenue_uplift_pct=_rev,
+        capture_cost_multiple=_cap,
+        years=7,
+    )
+
+    st.markdown("---")
+
+    # ---- Headline tiles ----
+    st.markdown(
+        '<div class="section-header">Run-Rate Synergies (Y3+)</div>',
+        unsafe_allow_html=True,
+    )
+    h1, h2, h3, h4 = st.columns(4)
+    with h1:
+        st.markdown(metric_card(
+            "Cost Takeout (run-rate)",
+            fmt_dollar(schedule.attrs["runrate_cost_takeout"]),
+            "accent",
+        ), unsafe_allow_html=True)
+    with h2:
+        st.markdown(metric_card(
+            "Revenue Uplift (run-rate)",
+            fmt_dollar(schedule.attrs["runrate_revenue_uplift"]),
+            "accent",
+        ), unsafe_allow_html=True)
+    with h3:
+        st.markdown(metric_card(
+            "Total Capture Cost (one-time)",
+            fmt_dollar(schedule.attrs["total_capture_cost"]),
+            "neutral",
+        ), unsafe_allow_html=True)
+    with h4:
+        _npv = schedule.attrs["synergy_npv"]
+        st.markdown(metric_card(
+            "Synergy NPV @ 10%",
+            fmt_dollar(_npv),
+            "accent" if _npv > 0 else "neutral",
+        ), unsafe_allow_html=True)
+
+    _cap_factor = schedule.attrs["capability_factor"]
+    _total_rr = schedule.attrs["runrate_total_synergy"]
+    _pct_rev = (_total_rr / annual_revenue * 100) if annual_revenue else 0
+    st.caption(
+        f"Buyer-capability factor: {_cap_factor:.0%} of addressable. "
+        f"Total Y3+ run-rate synergy: {fmt_dollar(_total_rr)} "
+        f"({_pct_rev:.1f}% of target revenue). "
+        f"Ramp 20% Y1 / 60% Y2 / 90% Y3 / 100% Y4+. "
+        f"Capture cost spread 60/30/10 across Y1-Y3."
+    )
+
+    # ---- Ramp chart ----
+    st.markdown(
+        '<div class="section-header">Year-by-Year Ramp</div>',
+        unsafe_allow_html=True,
+    )
+    fig_int = go.Figure()
+    fig_int.add_trace(go.Bar(
+        x=schedule["year"], y=schedule["cost_takeout"],
+        name="Cost Takeout", marker_color="#48bb78",
+    ))
+    fig_int.add_trace(go.Bar(
+        x=schedule["year"], y=schedule["revenue_uplift"],
+        name="Revenue Uplift", marker_color="#4299e1",
+    ))
+    fig_int.add_trace(go.Bar(
+        x=schedule["year"], y=-schedule["capture_cost"],
+        name="Capture Cost", marker_color="#fc8181",
+    ))
+    fig_int.add_trace(go.Scatter(
+        x=schedule["year"], y=schedule["net_synergy"],
+        name="Net Synergy", mode="lines+markers",
+        line=dict(color="#f6e05e", width=3),
+    ))
+    fig_int.update_layout(
+        **plotly_layout(),
+        barmode="relative",
+        title="Synergy Realization vs. Capture Cost by Year",
+        xaxis_title="Year",
+        yaxis_title="$ Impact on EBITDA",
+        height=420,
+    )
+    st.plotly_chart(fig_int, use_container_width=True)
+
+    # ---- Detail table ----
+    st.markdown(
+        '<div class="section-header">Synergy Schedule</div>',
+        unsafe_allow_html=True,
+    )
+    disp = schedule.copy()
+    for col in ["cost_takeout", "revenue_uplift", "capture_cost",
+                "net_synergy", "cumulative_synergy"]:
+        disp[col] = disp[col].apply(lambda v: f"${v:,.0f}")
+    disp.columns = ["Year", "Cost Takeout", "Revenue Uplift",
+                    "Capture Cost", "Net Synergy", "Cumulative"]
+    st.dataframe(disp, use_container_width=True, hide_index=True)
+
+    # ---- Sanity-check caption ----
+    st.markdown("---")
+    st.caption(
+        "Sanity check (banker memo worked example): a $400M-AUM target with "
+        "$3.2M revenue and $2M expense base, tucked into a full-overlap $1B+ "
+        "buyer at default sliders (14% cost takeout / 7% revenue uplift / "
+        "1.25x capture), yields total Y3+ run-rate synergy of approximately "
+        "$488K (about 15% of revenue) with approximately $610K total capture "
+        "cost. The framework above produces approximately $504K run-rate and "
+        "$630K capture for those inputs."
+    )
 
 
 # ==============================================================================

@@ -251,6 +251,90 @@ def implied_multiples(purchase_price: float, revenue: float, aum: float, eboc: f
     }
 
 
+def compute_synergy_schedule(
+    target_revenue: float,
+    target_expense_base: float,
+    buyer_profile: dict = None,
+    cost_takeout_pct: float = 0.14,
+    revenue_uplift_pct: float = 0.07,
+    capture_cost_multiple: float = 1.25,
+    years: int = 7,
+    discount_rate: float = 0.10,
+) -> pd.DataFrame:
+    """Per-year integration synergy schedule per banker-MD memo Part E.
+
+    Cost takeout is a percentage of TARGET expense base, scaled by which
+    buyer capabilities create redundancy. Ramp 20% / 60% / 90% / 100%
+    over Y1-Y4+. Revenue uplift is a percentage of TARGET revenue
+    (fee harmonization, wallet share, brand-referral lift); it lags one
+    year vs. cost takeout because fee harmonization needs a billing cycle.
+    Capture cost is 1.0-1.5x of annual run-rate synergy, spread 60/30/10
+    across Y1-Y3 (severance, dual-running systems, retention bonuses).
+
+    `buyer_profile` is a dict of booleans (has_compliance_team,
+    has_tech_stack, has_planning_shop, has_back_office, has_cco_redundancy).
+    Each present capability adds a weight to the capability factor, which
+    scales addressable synergy. None = full overlap (factor 1.0).
+    Floor 25% so vendor consolidation / benefits still register.
+
+    Returns DataFrame with columns: year, cost_takeout, revenue_uplift,
+    capture_cost, net_synergy, cumulative_synergy. Run-rate metadata
+    attached via df.attrs: runrate_cost_takeout, runrate_revenue_uplift,
+    runrate_total_synergy, total_capture_cost, capability_factor,
+    synergy_npv.
+    """
+    cost_ramp = {1: 0.20, 2: 0.60, 3: 0.90}
+    rev_ramp = {1: 0.00, 2: 0.50, 3: 0.85}
+    capture_split = {1: 0.60, 2: 0.30, 3: 0.10}
+
+    if buyer_profile is None:
+        capability_factor = 1.0
+    else:
+        weights = {
+            "has_compliance_team": 0.30,
+            "has_tech_stack": 0.25,
+            "has_back_office": 0.20,
+            "has_planning_shop": 0.15,
+            "has_cco_redundancy": 0.10,
+        }
+        capability_factor = sum(
+            w for k, w in weights.items() if buyer_profile.get(k, False)
+        )
+        capability_factor = max(capability_factor, 0.25)
+
+    annual_cost_takeout_runrate = target_expense_base * cost_takeout_pct * capability_factor
+    annual_revenue_uplift_runrate = target_revenue * revenue_uplift_pct * capability_factor
+    total_runrate = annual_cost_takeout_runrate + annual_revenue_uplift_runrate
+    total_capture_cost = total_runrate * capture_cost_multiple
+
+    rows = []
+    cumulative = 0.0
+    for yr in range(1, years + 1):
+        cost_takeout = annual_cost_takeout_runrate * cost_ramp.get(yr, 1.00)
+        revenue_uplift = annual_revenue_uplift_runrate * rev_ramp.get(yr, 1.00)
+        capture_cost = total_capture_cost * capture_split.get(yr, 0.0)
+        net = cost_takeout + revenue_uplift - capture_cost
+        cumulative += net
+        rows.append({
+            "year": yr,
+            "cost_takeout": cost_takeout,
+            "revenue_uplift": revenue_uplift,
+            "capture_cost": capture_cost,
+            "net_synergy": net,
+            "cumulative_synergy": cumulative,
+        })
+
+    df = pd.DataFrame(rows)
+    npv = sum(row["net_synergy"] / ((1 + discount_rate) ** row["year"]) for row in rows)
+    df.attrs["runrate_cost_takeout"] = annual_cost_takeout_runrate
+    df.attrs["runrate_revenue_uplift"] = annual_revenue_uplift_runrate
+    df.attrs["runrate_total_synergy"] = total_runrate
+    df.attrs["total_capture_cost"] = total_capture_cost
+    df.attrs["capability_factor"] = capability_factor
+    df.attrs["synergy_npv"] = npv
+    return df
+
+
 def build_pro_forma(
     revenue: float,
     ebitda: float,
@@ -296,6 +380,11 @@ def build_pro_forma(
     # tool's $200K constant but should be overridden for senior CIO seats
     # at $500M+ AUM firms (typically $400-700K).
     replacement_cost: float = MARKET_REPLACEMENT_COST,
+    # Optional ramped synergy schedule from compute_synergy_schedule(). When
+    # provided, per-year cost_takeout + revenue_uplift - capture_cost OVERRIDE
+    # the flat `integration_costs` and `annual_synergies` inputs above. This
+    # is the banker-MD Part E framework.
+    synergy_schedule: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """Build a year-by-year pro forma P&L for years 1-N."""
     rows = []
@@ -358,15 +447,33 @@ def build_pro_forma(
         # Expenses grow at a slower pace (assume 2% cost inflation)
         cost_inflation = 0.02
         yr_expenses = base_expenses * ((1 + cost_inflation) ** yr) + additional_staff_cost
-        yr_expenses -= annual_synergies  # subtract synergies
+
+        # Synergy treatment: if a ramped schedule is provided (banker Part E),
+        # use it; otherwise fall back to the flat manual-override inputs.
+        if synergy_schedule is not None and len(synergy_schedule) > 0:
+            srow = synergy_schedule[synergy_schedule["year"] == yr]
+            if len(srow) > 0:
+                yr_cost_takeout = float(srow["cost_takeout"].iloc[0])
+                yr_revenue_uplift = float(srow["revenue_uplift"].iloc[0])
+                yr_capture_cost = float(srow["capture_cost"].iloc[0])
+            else:
+                # Past the schedule horizon — assume Y3+ run-rate persists,
+                # capture cost done.
+                last = synergy_schedule.iloc[-1]
+                yr_cost_takeout = float(last["cost_takeout"])
+                yr_revenue_uplift = float(last["revenue_uplift"])
+                yr_capture_cost = 0.0
+            yr_expenses -= yr_cost_takeout
+            yr_revenue += yr_revenue_uplift
+            yr_integration = yr_capture_cost
+        else:
+            yr_expenses -= annual_synergies  # legacy flat synergies
+            yr_integration = integration_costs if yr == 1 else 0  # legacy lump-sum
 
         # Transition compensation costs
         yr_consulting = consulting_annual if yr <= consulting_years else 0
         yr_noncompete = annual_noncompete if yr <= noncompete_years else 0
         yr_transition = yr_consulting + yr_noncompete
-
-        # One-time integration costs in year 1
-        yr_integration = integration_costs if yr == 1 else 0
 
         yr_ebitda = yr_revenue - yr_expenses - yr_integration - yr_transition
 
@@ -639,6 +746,125 @@ def build_seller_note_amortization(
     return pd.DataFrame(rows)
 
 
+def _aum_tier_for(aum: float) -> str:
+    """Map an AUM value to one of the five comp-database tier strings."""
+    if aum < 200_000_000:
+        return "<200M"
+    if aum < 500_000_000:
+        return "200M-500M"
+    if aum < 1_000_000_000:
+        return "500M-1B"
+    if aum < 5_000_000_000:
+        return "1B-5B"
+    return "5B+"
+
+
+def _recurring_tier_for(pct_recurring: float) -> str:
+    """Map a recurring-revenue % (0-100) to one of the three comp tiers."""
+    if pct_recurring < 70:
+        return "<70%"
+    if pct_recurring < 90:
+        return "70-90%"
+    return "90%+"
+
+
+# Adjacent AUM tiers used when the primary slice has too few comps. Ordered
+# inside-out so a 500M-1B miss looks at 200M-500M and 1B-5B before fanning
+# wider. Keeps the fallback localized to economically similar deals rather
+# than collapsing the whole table.
+_ADJACENT_AUM_TIERS = {
+    "<200M": ["200M-500M"],
+    "200M-500M": ["<200M", "500M-1B"],
+    "500M-1B": ["200M-500M", "1B-5B"],
+    "1B-5B": ["500M-1B", "5B+"],
+    "5B+": ["1B-5B"],
+}
+
+
+def lookup_comps_band(
+    aum: float,
+    pct_recurring: float,
+    comps_df: pd.DataFrame,
+) -> dict:
+    """Return P25 / median / P75 of EV/EBITDA and EV/Revenue for the
+    relevant AUM x recurring slice. Falls back to a wider AUM band if the
+    primary slice has <5 deals; returns None for either multiple when the
+    slice is too thin to be meaningful.
+
+    Returns a dict with keys:
+        aum_tier, recurring_tier: the chosen slice labels
+        n_primary: deals in the primary AUM x recurring slice
+        n_used: deals used to compute the band after any fallback
+        fallback: True if we widened the slice
+        ev_ebitda: dict of {p25, median, p75} or None if too thin
+        ev_revenue: dict of {p25, median, p75} or None if too thin
+        slice_df: the DataFrame rows used (for downstream UI)
+    """
+    if comps_df is None or len(comps_df) == 0:
+        return {
+            "aum_tier": _aum_tier_for(aum),
+            "recurring_tier": _recurring_tier_for(pct_recurring),
+            "n_primary": 0,
+            "n_used": 0,
+            "fallback": False,
+            "ev_ebitda": None,
+            "ev_revenue": None,
+            "slice_df": comps_df,
+        }
+
+    aum_tier = _aum_tier_for(aum)
+    rec_tier = _recurring_tier_for(pct_recurring)
+
+    primary = comps_df[
+        (comps_df["aum_tier"] == aum_tier)
+        & (comps_df["recurring_tier"] == rec_tier)
+    ]
+    n_primary = len(primary)
+
+    used = primary
+    fallback = False
+    if n_primary < 5:
+        widened_tiers = [aum_tier] + _ADJACENT_AUM_TIERS.get(aum_tier, [])
+        widened = comps_df[
+            (comps_df["aum_tier"].isin(widened_tiers))
+            & (comps_df["recurring_tier"] == rec_tier)
+        ]
+        if len(widened) >= 5:
+            used = widened
+            fallback = True
+        else:
+            widened2 = comps_df[comps_df["aum_tier"].isin(widened_tiers)]
+            if len(widened2) >= 5:
+                used = widened2
+                fallback = True
+            else:
+                used = primary
+
+    def _band(series: pd.Series):
+        series = series.dropna()
+        if len(series) < 5:
+            return None
+        return {
+            "p25": float(series.quantile(0.25)),
+            "median": float(series.median()),
+            "p75": float(series.quantile(0.75)),
+        }
+
+    ev_ebitda = _band(used["ev_ebitda_multiple"]) if "ev_ebitda_multiple" in used.columns else None
+    ev_revenue = _band(used["ev_revenue_multiple"]) if "ev_revenue_multiple" in used.columns else None
+
+    return {
+        "aum_tier": aum_tier,
+        "recurring_tier": rec_tier,
+        "n_primary": n_primary,
+        "n_used": len(used),
+        "fallback": fallback,
+        "ev_ebitda": ev_ebitda,
+        "ev_revenue": ev_revenue,
+        "slice_df": used,
+    }
+
+
 def compute_dscr(pro_forma: pd.DataFrame) -> pd.Series:
     """Debt Service Coverage Ratio = EBITDA / (Debt Service + Seller Note Payment).
 
@@ -871,6 +1097,7 @@ _PRO_FORMA_PARAMS = {
     "noncompete_total", "noncompete_years",
     "tax_rate",
     "earnout_achievement", "replacement_cost",
+    "synergy_schedule",
 }
 
 

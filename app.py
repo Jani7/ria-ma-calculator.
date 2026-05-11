@@ -12,6 +12,7 @@ from calculations import (
     compute_irr_and_returns, build_loan_amortization,
     build_seller_note_amortization, compute_dscr,
     compute_valuation_band, auto_replacement_cost,
+    suggest_deal_structure,
     compute_earnout_scenarios, compute_seller_total_proceeds,
     sensitivity_irr, sensitivity_breakeven,
 )
@@ -1643,10 +1644,16 @@ else:
     purchase_price = int(annual_revenue * rev_multiple)
     st.sidebar.info(f"Implied Price: {fmt_dollar(purchase_price)}")
 
-pct_upfront_cash = st.sidebar.slider("% Upfront Cash", 0, 100, 60, 5) / 100
-pct_seller_note = st.sidebar.slider("% Seller Note", 0, 100, 20, 5) / 100
-pct_earnout = st.sidebar.slider("% Earnout", 0, 100, 15, 5) / 100
-pct_equity_rollover = st.sidebar.slider("% Equity Rollover", 0, 100, 5, 5) / 100
+# Explicit keys so the "Apply suggested splits" button on Tab 1 can write
+# values into these sliders via the _queue_apply / _apply_pending pattern.
+for _k, _v in (("pct_upfront_cash", 60), ("pct_seller_note", 20),
+               ("pct_earnout", 15), ("pct_equity_rollover", 5)):
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+pct_upfront_cash = st.sidebar.slider("% Upfront Cash", 0, 100, step=5, key="pct_upfront_cash") / 100
+pct_seller_note = st.sidebar.slider("% Seller Note", 0, 100, step=5, key="pct_seller_note") / 100
+pct_earnout = st.sidebar.slider("% Earnout", 0, 100, step=5, key="pct_earnout") / 100
+pct_equity_rollover = st.sidebar.slider("% Equity Rollover", 0, 100, step=5, key="pct_equity_rollover") / 100
 
 deal_total = pct_upfront_cash + pct_seller_note + pct_earnout + pct_equity_rollover
 if abs(deal_total - 1.0) > 0.01:
@@ -1784,6 +1791,11 @@ valuation = compute_valuation_band(
     revenue=annual_revenue, ebitda=ebitda, owner_comp=owner_comp,
     aum=aum, pct_recurring=pct_recurring, growth_rate=rev_growth,
     replacement_cost=replacement_cost,
+)
+
+# Suggested deal structure based on firm profile (banker memo, Part C).
+suggested_deal = suggest_deal_structure(
+    aum=aum, pct_recurring=pct_recurring, growth_rate=rev_growth,
 )
 
 pro_forma = build_pro_forma(
@@ -1936,27 +1948,75 @@ with tab1:
     with vb3:
         st.markdown(metric_card("High", fmt_dollar(valuation["high"]), "neutral"), unsafe_allow_html=True)
     _f = valuation["factors"]
+    # Two clean lines: methodology + factor breakdown + verdict. Avoiding
+    # inline bold mid-sentence keeps the typography consistent with the
+    # rest of the Streamlit captions on the page.
+    _adj = fmt_dollar(valuation['adj_ebitda'])
+    _repl = fmt_dollar(valuation['replacement_cost'])
     st.caption(
-        f"**{valuation['final_multiple']:.1f}× adj. EBITDA** "
-        f"(base 7.0× × multipliers: recurring {_f['recurring']:.2f} · "
-        f"size {_f['size']:.2f} · growth {_f['growth']:.2f} · margin {_f['margin']:.2f}). "
-        f"Adjusted EBITDA: {fmt_dollar(valuation['adj_ebitda'])} "
-        f"(EBITDA + Owner Comp − {fmt_dollar(valuation['replacement_cost'])} replacement). "
-        f"Band ±{valuation['band_width']*100:.0f}%. "
-        f"Your entered price ({fmt_dollar(purchase_price)}) "
-        + ("is **in band**." if valuation["low"] <= purchase_price <= valuation["high"]
-           else ("is **below band** — possible bargain or hidden risk."
-                 if purchase_price < valuation["low"]
-                 else "is **above band** — verify upside drivers or expect margin compression."))
+        f"Multiple: {valuation['final_multiple']:.1f}× adjusted EBITDA "
+        f"(base 7.0× × stacked multipliers). "
+        f"Adjusted EBITDA {_adj} = EBITDA + Owner Comp − {_repl} replacement. "
+        f"Band width ±{valuation['band_width']*100:.0f}%."
     )
+    st.caption(
+        "Factors — "
+        f"Recurring {_f['recurring']:.2f}× · "
+        f"Size {_f['size']:.2f}× · "
+        f"Growth {_f['growth']:.2f}× · "
+        f"Margin {_f['margin']:.2f}× · "
+        f"Book {_f['book_quality']:.2f}× · "
+        f"Geo {_f['geography']:.2f}× · "
+        f"Key-person {_f['key_person']:.2f}×"
+    )
+    if valuation["low"] <= purchase_price <= valuation["high"]:
+        _verdict = f"Your entered price ({fmt_dollar(purchase_price)}) is in band."
+    elif purchase_price < valuation["low"]:
+        _verdict = (f"Your entered price ({fmt_dollar(purchase_price)}) is below band "
+                    "— possible bargain or hidden risk.")
+    else:
+        _verdict = (f"Your entered price ({fmt_dollar(purchase_price)}) is above band "
+                    "— verify upside drivers or expect margin compression.")
+    st.caption(_verdict)
     if aum > 10e9:
         st.caption(
-            "*Mega-RIA caveat: at $10B+ AUM, valuations are bespoke and driven by "
+            "Mega-RIA caveat: at $10B+ AUM, valuations are bespoke and driven by "
             "enterprise dynamics (PE rolls, equity stakes, sum-of-the-parts). Recent "
             "aggregator transactions priced at 16-22× EBITDA — see Hellman & Friedman / "
             "Edelman, Stone Point / Mariner, GTCR / Captrust for precedent. Band above "
-            "should be read directionally only.*"
+            "should be read directionally only."
         )
+
+    # ---- Suggested Deal Structure (banker memo, Part C) ----
+    # Recommended upfront/note/earnout/rollover mix for this firm profile.
+    # User can adopt with one click or keep adjusting sliders manually.
+    st.markdown('<div class="section-header">Suggested Deal Structure</div>', unsafe_allow_html=True)
+    sd = suggested_deal
+    sd1, sd2, sd3, sd4 = st.columns(4)
+    with sd1:
+        st.markdown(metric_card("Upfront Cash", fmt_pct(sd['upfront']), "accent"), unsafe_allow_html=True)
+    with sd2:
+        st.markdown(metric_card("Seller Note", fmt_pct(sd['note']), "neutral"), unsafe_allow_html=True)
+    with sd3:
+        st.markdown(metric_card("Earnout", fmt_pct(sd['earnout']), "neutral"), unsafe_allow_html=True)
+    with sd4:
+        st.markdown(metric_card("Equity Rollover", fmt_pct(sd['rollover']), "neutral"), unsafe_allow_html=True)
+    st.caption(
+        f"Profile: **{sd['profile'].replace('_', ' ').title()}**. {sd['rationale']} "
+        f"Recommended note rate {sd['note_rate']*100:.1f}% over {sd['note_term']} years, "
+        f"{sd['earnout_period']}-year earnout capped at {sd['earnout_cap_pct']}%, "
+        f"{sd['standstill_years']}-year note standstill if bank-financed."
+    )
+    _apply_col, _ = st.columns([1, 3])
+    with _apply_col:
+        if st.button("Apply suggested splits", key="apply_suggested_deal", type="primary", use_container_width=True):
+            # Queue the slider keys; _apply_pending() picks them up next rerun.
+            _queue_apply("pct_upfront_cash", int(round(sd['upfront'] * 100)))
+            _queue_apply("pct_seller_note", int(round(sd['note'] * 100)))
+            _queue_apply("pct_earnout", int(round(sd['earnout'] * 100)))
+            _queue_apply("pct_equity_rollover", int(round(sd['rollover'] * 100)))
+            st.toast(f"Applied {sd['profile'].replace('_', ' ')} structure.", icon="✅")
+            st.rerun()
 
     st.markdown('<div class="section-header">Purchase Price & Implied Multiples</div>', unsafe_allow_html=True)
 

@@ -35,6 +35,102 @@ def compute_eboc(ebitda: float, owner_comp: float, replacement_cost: float = MAR
     return ebitda + (owner_comp - replacement_cost)
 
 
+def suggest_deal_structure(
+    aum: float,
+    pct_recurring: float,
+    growth_rate: float,
+    key_person_score: float = 1.00,
+    owner_age: int = 60,
+    owner_staying: bool = True,
+) -> dict:
+    """Recommend a deal-structure mix (upfront / note / earnout / rollover)
+    based on the firm's profile. Calibrated to 2025-26 RIA M&A market
+    bands per the banker-MD memo, Part C.
+
+    Returns the recommended percentage splits, note rate, earnout period,
+    earnout cap, standstill years, and a single-sentence rationale.
+    """
+    # Pick the closest deal profile from the memo's matrix.
+    # Note: order matters — check key-person concentration first because it
+    # dominates structure regardless of size.
+    if key_person_score <= 0.92:
+        profile = "key_person_concentrated"
+        upfront, note, earnout, rollover = 0.40, 0.15, 0.35, 0.10
+        rationale = ("High key-person concentration shifts consideration into "
+                     "earnout to align the owner with retention.")
+    elif aum < 200_000_000:
+        profile = "small_tuck_in"
+        upfront, note, earnout, rollover = 0.85, 0.10, 0.05, 0.00
+        rationale = ("Sub-$200M tuck-in: sellers won't accept long earnouts on "
+                     "a small base; structure leans mostly upfront with a "
+                     "short note.")
+    elif aum >= 1_000_000_000 and owner_staying:
+        profile = "platform"
+        upfront, note, earnout, rollover = 0.58, 0.10, 0.15, 0.17
+        rationale = ("$1B+ platform with owner staying: meaningful equity "
+                     "rollover for alignment, modest earnout on growth.")
+    elif growth_rate >= 0.10:
+        profile = "high_growth"
+        upfront, note, earnout, rollover = 0.58, 0.12, 0.20, 0.10
+        rationale = ("High organic growth (>10%): earnout captures the upside "
+                     "the seller is delivering; rollover keeps them invested.")
+    else:
+        profile = "mid_market"
+        upfront, note, earnout, rollover = 0.65, 0.15, 0.15, 0.05
+        rationale = ("Mid-market $200M-$1B target: balanced structure with "
+                     "moderate earnout for performance assurance.")
+
+    # Owner-age tilt: 65+ pushes more upfront (retiring soon), less rollover.
+    if owner_age >= 65:
+        # Shift 5% from rollover/earnout to upfront if available.
+        shift = min(0.05, rollover + earnout * 0.5)
+        if rollover >= shift:
+            rollover -= shift
+        else:
+            shift -= rollover
+            rollover = 0
+            earnout -= shift
+        upfront += shift if (upfront + shift) <= 0.95 else 0.95 - upfront
+
+    # Highly-recurring revenue → smaller earnout (less to bet on).
+    if pct_recurring >= 95 and earnout > 0.05:
+        earnout_cut = min(0.05, earnout - 0.05)
+        earnout -= earnout_cut
+        upfront += earnout_cut
+
+    # Normalize to 100% in case the heuristics overshot.
+    total = upfront + note + earnout + rollover
+    upfront, note, earnout, rollover = (x / total for x in (upfront, note, earnout, rollover))
+
+    # Earnout cap: 125% standard, narrower if recurring is high (less upside).
+    earnout_cap_pct = 125 if pct_recurring < 95 else 115
+    # Earnout period: 3 years is market standard.
+    earnout_period = 3
+
+    # Note rate: SOFR + 250-400 bps on 2025-26 deals. SOFR currently ~4.3%
+    # so prime rate is roughly 6.5-8.0%. Default to 6.5% with cap at 8.5%.
+    note_rate = 0.065
+    note_term = 5
+
+    # Standstill: bank-financed deals require 1-2 years; self-funded don't.
+    # The caller will set this based on pct_self_funded; we recommend 1.
+    standstill_years = 1
+
+    return {
+        "profile": profile,
+        "upfront": upfront,
+        "note": note,
+        "earnout": earnout,
+        "rollover": rollover,
+        "note_rate": note_rate,
+        "note_term": note_term,
+        "earnout_period": earnout_period,
+        "earnout_cap_pct": earnout_cap_pct,
+        "standstill_years": standstill_years,
+        "rationale": rationale,
+    }
+
+
 def compute_valuation_band(
     revenue: float,
     ebitda: float,

@@ -28,6 +28,7 @@ class FirmMatch:
     firm_name: str
     aum: float
     score: float  # rapidfuzz match score 0-100
+    registration_type: Optional[str] = None  # "sec" | "state" | "exempt" | None
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class FirmData:
     num_accounts: Optional[int]
     as_of_date: Optional[str]  # ISO date string from the filing
     aum_prior_year: Optional[float]
+    registration_type: Optional[str] = None  # "sec" | "state" | "exempt" | None
 
     @property
     def growth_rate(self) -> Optional[float]:
@@ -87,17 +89,25 @@ def search_firms(query: str, df: pd.DataFrame, limit: int = 10) -> list[FirmMatc
         limit=limit,
     )
 
+    # 88 is empirically the threshold above which matches are recognizably the
+    # same firm. WRatio inflates pure token-overlap (e.g. anything ending in
+    # "WEALTH" hits 86 against a "Wealth" query) so anything below 88 was
+    # noise that made out-of-dataset searches look like they returned hits.
     matches = []
     for name, score, idx in results:
-        if score < 50:  # below this, matches are noise
+        if score < 88:
             continue
         row = df.iloc[idx]
+        reg = row.get("registration_type") if "registration_type" in df.columns else None
         matches.append(
             FirmMatch(
                 crd=int(row["crd"]),
                 firm_name=str(row["firm_name"]),
                 aum=float(row["aum"]) if pd.notna(row["aum"]) else 0.0,
                 score=float(score),
+                registration_type=(
+                    str(reg) if reg is not None and pd.notna(reg) else None
+                ),
             )
         )
     return matches
@@ -127,4 +137,5 @@ def get_firm_data(crd: int, df: pd.DataFrame) -> Optional[FirmData]:
         num_accounts=_opt_int(row.get("num_accounts")),
         as_of_date=_opt_str(row.get("as_of_date")),
         aum_prior_year=_opt_float(row.get("aum_prior_year")),
+        registration_type=_opt_str(row.get("registration_type")) if "registration_type" in hit.columns else None,
     )

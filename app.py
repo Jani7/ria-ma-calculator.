@@ -16,6 +16,8 @@ from calculations import (
 )
 import sec_lookup
 import tempfile
+import threading
+import urllib.parse
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -121,6 +123,10 @@ def _resolve_adv() -> dict:
         return {"path": None, "status": "network_error"}
     except OSError:
         return {"path": None, "status": "io_error"}
+    except Exception:
+        # Catch-all so exotic exceptions don't bubble to Streamlit's error
+        # overlay (which would surface the private repo name from the f-string).
+        return {"path": None, "status": "unknown_error"}
 
 
 def _ensure_adv_data_path():
@@ -147,8 +153,11 @@ def _load_adv_df():
 # -- Page config ---------------------------------------------------------------
 st.set_page_config(page_title="RIA M&A Calculator", page_icon="📊", layout="wide")
 
-# -- Dark theme CSS ------------------------------------------------------------
-st.markdown("""
+# -- Theme state (initialized BEFORE CSS injection so the first paint is correct)
+if "theme" not in st.session_state:
+    st.session_state.theme = "dark"
+
+_DARK_CSS = """
 <style>
     .stApp { background-color: #0e1117; }
     .metric-card {
@@ -211,8 +220,157 @@ st.markdown("""
         font-family: 'SF Mono', 'Consolas', monospace;
         font-size: 0.95rem;
     }
+    /* Constrain tooltip width inside the sidebar so the help-icon popover
+       doesn't overflow left at narrow viewports. */
+    div[data-testid="stSidebar"] div[role="tooltip"] {
+        max-width: 240px;
+        white-space: normal;
+        word-wrap: break-word;
+    }
+    /* Site footer (dark) */
+    .site-footer {
+        border-top: 1px solid #2d3748;
+        margin: 36px auto 0 auto;
+        padding: 18px 12px 28px 12px;
+        text-align: center;
+        color: #8b95a5;
+        font-size: 0.78rem;
+        line-height: 1.55;
+        max-width: 880px;
+    }
+    .site-footer a { color: #63b3ed; text-decoration: none; }
+    .site-footer a:hover { text-decoration: underline; }
+    .site-footer .footer-meta { color: #6b7280; margin-top: 8px; }
 </style>
-""", unsafe_allow_html=True)
+"""
+
+_LIGHT_CSS = """
+<style>
+    .stApp { background-color: #ffffff; color: #1a202c; }
+    .metric-card {
+        background: linear-gradient(135deg, #f7fafc 0%, #edf2f7 100%);
+        border: 1px solid #cbd5e0;
+        border-radius: 12px;
+        padding: 16px 12px;
+        text-align: center;
+        margin: 5px;
+        min-height: 110px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .metric-card h3 {
+        color: #4a5568;
+        font-size: 0.7rem;
+        font-weight: 600;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .metric-card h2 {
+        color: #1a202c;
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin: 0;
+        white-space: nowrap;
+    }
+    .metric-card .positive { color: #2f855a; }
+    .metric-card .negative { color: #c53030; }
+    .metric-card .neutral { color: #2b6cb0; }
+    .section-header {
+        color: #1a202c;
+        border-bottom: 2px solid #2b6cb0;
+        padding-bottom: 8px;
+        margin: 25px 0 15px 0;
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+    div[data-testid="stSidebar"] {
+        background-color: #f7fafc;
+    }
+    div[data-testid="stSidebar"] * { color: #1a202c; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #edf2f7;
+        border-radius: 8px 8px 0 0;
+        padding: 10px 20px;
+        color: #4a5568;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #ffffff;
+        color: #1a202c;
+        border: 1px solid #cbd5e0;
+        border-bottom: none;
+    }
+    div[data-testid="stSidebar"] .stTextInput > div > div > input {
+        font-family: 'SF Mono', 'Consolas', monospace;
+        font-size: 0.95rem;
+    }
+    div[data-testid="stSidebar"] div[role="tooltip"] {
+        max-width: 240px;
+        white-space: normal;
+        word-wrap: break-word;
+    }
+    /* Site footer (light) */
+    .site-footer {
+        border-top: 1px solid #cbd5e0;
+        margin: 36px auto 0 auto;
+        padding: 18px 12px 28px 12px;
+        text-align: center;
+        color: #4a5568;
+        font-size: 0.78rem;
+        line-height: 1.55;
+        max-width: 880px;
+    }
+    .site-footer a { color: #2b6cb0; text-decoration: none; }
+    .site-footer a:hover { text-decoration: underline; }
+    .site-footer .footer-meta { color: #718096; margin-top: 8px; }
+</style>
+"""
+
+
+def _is_light() -> bool:
+    return st.session_state.get("theme", "dark") == "light"
+
+
+# Inject the active theme's CSS.
+st.markdown(_LIGHT_CSS if _is_light() else _DARK_CSS, unsafe_allow_html=True)
+
+
+def render_site_footer():
+    """Render the site footer. Safe to call on both the welcome page and
+    the calculator page; the .site-footer class adapts to the active theme."""
+    sec_url = (
+        "https://www.sec.gov/data-research/sec-markets-data/"
+        "information-about-registered-investment-advisers-exempt-reporting-advisers"
+    )
+    st.markdown(
+        f"""
+        <div class="site-footer">
+            RIA M&amp;A Calculator &middot; RAUM in Dollars &middot;
+            Source: <a href="{sec_url}" target="_blank" rel="noopener">SEC Form ADV</a><br>
+            All information is derived from publicly available SEC Form ADV filings and is
+            provided for informational purposes only. Firm data and other metrics are
+            inferred from filing records and are not guaranteed to be accurate or complete.
+            Nothing on this site constitutes investment, legal, or professional advice and
+            should not be used as the basis for any decision.
+            <div class="footer-meta">
+                Built by Dhruv Jani &middot; &copy; 2026 Dhruv Jani &middot;
+                Site design, code, and original analysis protected by copyright.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _toggle_theme():
+    """Callback for the theme switch button — flip dark <-> light."""
+    st.session_state.theme = "light" if st.session_state.get("theme", "dark") == "dark" else "dark"
+
 
 # -- Session state -------------------------------------------------------------
 if "show_calculator" not in st.session_state:
@@ -233,9 +391,57 @@ if "sec_lookup_history" not in st.session_state:
 SEC_LOOKUP_LIMIT = 25
 SEC_LOOKUP_WINDOW_SEC = 30 * 60
 
+# Module-level IP -> [epoch seconds] history, guarded by a lock so concurrent
+# Streamlit script reruns (separate threads in the same process) don't race.
+# Used in addition to the per-session history so a single client can't open
+# multiple tabs/sessions to bypass the cap.
+_IP_LOOKUP_HISTORY: dict[str, list[float]] = {}
+_IP_LOOKUP_LOCK = threading.Lock()
+
+
+def _client_ip() -> "str | None":
+    """Best-effort client IP from the X-Forwarded-For header.
+
+    Streamlit ≥1.31 exposes request headers via st.context.headers. Returns
+    None if the header is missing or the runtime doesn't support it — callers
+    should then fall back to session-only quota."""
+    try:
+        headers = st.context.headers  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    if not headers:
+        return None
+    xff = headers.get("X-Forwarded-For") or headers.get("x-forwarded-for")
+    if not xff:
+        return None
+    first = xff.split(",", 1)[0].strip()
+    return first or None
+
+
+def _ip_quota(ip: str) -> tuple[int, int]:
+    """Returns (remaining_for_ip, seconds_until_oldest_expires) for the given IP.
+
+    Prunes the history list in place under the module lock."""
+    import time
+    now = time.time()
+    with _IP_LOOKUP_LOCK:
+        hist = [t for t in _IP_LOOKUP_HISTORY.get(ip, []) if now - t < SEC_LOOKUP_WINDOW_SEC]
+        _IP_LOOKUP_HISTORY[ip] = hist
+        used = len(hist)
+        remaining = max(0, SEC_LOOKUP_LIMIT - used)
+        wait = 0
+        if used >= SEC_LOOKUP_LIMIT:
+            wait = int(SEC_LOOKUP_WINDOW_SEC - (now - min(hist)))
+    return remaining, wait
+
 
 def _sec_lookup_quota() -> tuple[bool, int, int]:
-    """Returns (allowed, remaining, seconds_until_oldest_expires)."""
+    """Returns (allowed, remaining, seconds_until_oldest_expires).
+
+    Combined check: the binding quota is the lower of the session-keyed and
+    (when available) the IP-keyed counters. If X-Forwarded-For is absent we
+    fall through to session-only — this avoids accidentally permitting more
+    than the cap on dev/local runs that lack a proxy header."""
     import time
     now = time.time()
     st.session_state.sec_lookup_history = [
@@ -243,16 +449,30 @@ def _sec_lookup_quota() -> tuple[bool, int, int]:
         if now - t < SEC_LOOKUP_WINDOW_SEC
     ]
     used = len(st.session_state.sec_lookup_history)
-    remaining = max(0, SEC_LOOKUP_LIMIT - used)
-    wait = 0
+    sess_remaining = max(0, SEC_LOOKUP_LIMIT - used)
+    sess_wait = 0
     if used >= SEC_LOOKUP_LIMIT:
-        wait = int(SEC_LOOKUP_WINDOW_SEC - (now - min(st.session_state.sec_lookup_history)))
+        sess_wait = int(SEC_LOOKUP_WINDOW_SEC - (now - min(st.session_state.sec_lookup_history)))
+
+    ip = _client_ip()
+    if ip is None:
+        return sess_remaining > 0, sess_remaining, sess_wait
+
+    ip_remaining, ip_wait = _ip_quota(ip)
+    # Binding constraint is whichever is tighter.
+    remaining = min(sess_remaining, ip_remaining)
+    wait = max(sess_wait, ip_wait) if remaining == 0 else 0
     return remaining > 0, remaining, wait
 
 
 def _record_sec_lookup():
     import time
-    st.session_state.sec_lookup_history.append(time.time())
+    now = time.time()
+    st.session_state.sec_lookup_history.append(now)
+    ip = _client_ip()
+    if ip is not None:
+        with _IP_LOOKUP_LOCK:
+            _IP_LOOKUP_HISTORY.setdefault(ip, []).append(now)
 
 
 def _queue_apply(widget_key: str, value):
@@ -269,15 +489,30 @@ def _apply_pending():
         st.session_state[key] = value
     st.session_state.pending_apply.clear()
 
-PLOTLY_LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(26,31,46,0.8)",
-    font=dict(color="#e2e8f0", size=12),
-    xaxis=dict(gridcolor="#2d3748", zerolinecolor="#2d3748"),
-    yaxis=dict(gridcolor="#2d3748", zerolinecolor="#2d3748"),
-    margin=dict(l=40, r=40, t=50, b=40),
-    legend=dict(bgcolor="rgba(0,0,0,0)"),
-)
+def plotly_layout() -> dict:
+    """Return the Plotly layout kwargs for the currently active theme.
+
+    Replaces a previous module-level PLOTLY_LAYOUT constant so charts re-render
+    correctly when the user toggles dark/light mode mid-session."""
+    if _is_light():
+        return dict(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(247,250,252,0.9)",
+            font=dict(color="#1a202c", size=12),
+            xaxis=dict(gridcolor="#e2e8f0", zerolinecolor="#cbd5e0"),
+            yaxis=dict(gridcolor="#e2e8f0", zerolinecolor="#cbd5e0"),
+            margin=dict(l=40, r=40, t=50, b=40),
+            legend=dict(bgcolor="rgba(0,0,0,0)"),
+        )
+    return dict(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(26,31,46,0.8)",
+        font=dict(color="#e2e8f0", size=12),
+        xaxis=dict(gridcolor="#2d3748", zerolinecolor="#2d3748"),
+        yaxis=dict(gridcolor="#2d3748", zerolinecolor="#2d3748"),
+        margin=dict(l=40, r=40, t=50, b=40),
+        legend=dict(bgcolor="rgba(0,0,0,0)"),
+    )
 
 COLORS = ["#4a90d9", "#48bb78", "#ed8936", "#fc8181", "#9f7aea", "#63b3ed"]
 
@@ -308,79 +543,100 @@ def metric_card(label, value, css_class="neutral"):
 
 def render_welcome_page():
     """Render the welcome/landing page with sidebar hidden."""
-    st.markdown("""
+    # Theme toggle, top-right. Placed BEFORE the welcome container so the
+    # absolute hero block can't cover it. Use a 3-column trick to right-align.
+    _wl, _wm, _wr = st.columns([8, 1, 1])
+    with _wr:
+        _icon = "☀️" if _is_light() else "🌙"
+        st.button(
+            _icon,
+            key="welcome_theme_toggle",
+            on_click=_toggle_theme,
+            help="Toggle day/dark mode",
+            use_container_width=True,
+        )
+
+    _light = _is_light()
+    _bg_card = "#ffffff" if _light else "#1a1f2e"
+    _border_card = "#cbd5e0" if _light else "#2d3748"
+    _h1_color = "#1a202c" if _light else "#e2e8f0"
+    _subtitle_color = "#4a5568" if _light else "#8b95a5"
+    _divider_color = "#2b6cb0" if _light else "#4a90d9"
+    _card_h3 = "#1a202c" if _light else "#e2e8f0"
+    _card_p = "#4a5568" if _light else "#6b7280"
+    st.markdown(f"""
     <style>
-        [data-testid="stSidebar"] { display: none; }
-        [data-testid="stSidebarCollapsedControl"] { display: none; }
-        .welcome-container {
+        [data-testid="stSidebar"] {{ display: none; }}
+        [data-testid="stSidebarCollapsedControl"] {{ display: none; }}
+        .welcome-container {{
             max-width: 880px;
             margin: 0 auto;
-            padding: 60px 20px 40px 20px;
-        }
-        .welcome-header {
+            padding: 20px 20px 40px 20px;
+        }}
+        .welcome-header {{
             text-align: center;
             margin-bottom: 48px;
-        }
-        .welcome-header h1 {
-            color: #e2e8f0;
+        }}
+        .welcome-header h1 {{
+            color: {_h1_color};
             font-size: 2.4rem;
             font-weight: 700;
             letter-spacing: -0.02em;
             margin-bottom: 12px;
             line-height: 1.2;
-        }
-        .welcome-header .subtitle {
-            color: #8b95a5;
+        }}
+        .welcome-header .subtitle {{
+            color: {_subtitle_color};
             font-size: 1.05rem;
             font-weight: 400;
             line-height: 1.6;
             max-width: 560px;
             margin: 0 auto;
-        }
-        .welcome-divider {
+        }}
+        .welcome-divider {{
             width: 48px;
             height: 2px;
-            background-color: #4a90d9;
+            background-color: {_divider_color};
             margin: 20px auto;
-        }
-        .feature-grid {
+        }}
+        .feature-grid {{
             display: grid;
             grid-template-columns: repeat(3, 1fr);
             gap: 14px;
             margin-bottom: 48px;
-        }
-        @media (max-width: 768px) {
-            .feature-grid { grid-template-columns: repeat(2, 1fr); }
-        }
-        @keyframes cardFadeUp {
-            from { opacity: 0; transform: translateY(18px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .feature-card {
-            background: #1a1f2e;
-            border: 1px solid #2d3748;
+        }}
+        @media (max-width: 768px) {{
+            .feature-grid {{ grid-template-columns: repeat(2, 1fr); }}
+        }}
+        @keyframes cardFadeUp {{
+            from {{ opacity: 0; transform: translateY(18px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
+        }}
+        .feature-card {{
+            background: {_bg_card};
+            border: 1px solid {_border_card};
             border-radius: 8px;
             padding: 22px 18px;
             transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
             animation: cardFadeUp 0.5s ease both;
-        }
-        .feature-card:nth-child(1) { animation-delay: 0.05s; }
-        .feature-card:nth-child(2) { animation-delay: 0.12s; }
-        .feature-card:nth-child(3) { animation-delay: 0.19s; }
-        .feature-card:nth-child(4) { animation-delay: 0.26s; }
-        .feature-card:nth-child(5) { animation-delay: 0.33s; }
-        .feature-card:nth-child(6) { animation-delay: 0.40s; }
-        .feature-card:hover {
+        }}
+        .feature-card:nth-child(1) {{ animation-delay: 0.05s; }}
+        .feature-card:nth-child(2) {{ animation-delay: 0.12s; }}
+        .feature-card:nth-child(3) {{ animation-delay: 0.19s; }}
+        .feature-card:nth-child(4) {{ animation-delay: 0.26s; }}
+        .feature-card:nth-child(5) {{ animation-delay: 0.33s; }}
+        .feature-card:nth-child(6) {{ animation-delay: 0.40s; }}
+        .feature-card:hover {{
             transform: translateY(-3px);
-            box-shadow: 0 8px 24px rgba(0,0,0,0.3);
-        }
-        .feature-card.fc-blue:hover   { border-color: #4a90d9; }
-        .feature-card.fc-green:hover  { border-color: #48bb78; }
-        .feature-card.fc-amber:hover  { border-color: #ed8936; }
-        .feature-card.fc-purple:hover { border-color: #9f7aea; }
-        .feature-card.fc-cyan:hover   { border-color: #63b3ed; }
-        .feature-card.fc-rose:hover   { border-color: #f687b3; }
-        .feature-icon {
+            box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+        }}
+        .feature-card.fc-blue:hover   {{ border-color: #4a90d9; }}
+        .feature-card.fc-green:hover  {{ border-color: #48bb78; }}
+        .feature-card.fc-amber:hover  {{ border-color: #ed8936; }}
+        .feature-card.fc-purple:hover {{ border-color: #9f7aea; }}
+        .feature-card.fc-cyan:hover   {{ border-color: #63b3ed; }}
+        .feature-card.fc-rose:hover   {{ border-color: #f687b3; }}
+        .feature-icon {{
             width: 32px;
             height: 32px;
             border-radius: 6px;
@@ -389,25 +645,25 @@ def render_welcome_page():
             justify-content: center;
             font-size: 0.9rem;
             margin-bottom: 12px;
-        }
-        .fi-blue   { background: rgba(74,144,217,0.15); color: #4a90d9; }
-        .fi-green  { background: rgba(72,187,120,0.15); color: #48bb78; }
-        .fi-amber  { background: rgba(237,137,54,0.15); color: #ed8936; }
-        .fi-purple { background: rgba(159,122,234,0.15); color: #9f7aea; }
-        .fi-cyan   { background: rgba(99,179,237,0.15); color: #63b3ed; }
-        .fi-rose   { background: rgba(246,135,179,0.15); color: #f687b3; }
-        .feature-card h3 {
-            color: #e2e8f0;
+        }}
+        .fi-blue   {{ background: rgba(74,144,217,0.15); color: #4a90d9; }}
+        .fi-green  {{ background: rgba(72,187,120,0.15); color: #48bb78; }}
+        .fi-amber  {{ background: rgba(237,137,54,0.15); color: #ed8936; }}
+        .fi-purple {{ background: rgba(159,122,234,0.15); color: #9f7aea; }}
+        .fi-cyan   {{ background: rgba(99,179,237,0.15); color: #63b3ed; }}
+        .fi-rose   {{ background: rgba(246,135,179,0.15); color: #f687b3; }}
+        .feature-card h3 {{
+            color: {_card_h3};
             font-size: 0.88rem;
             font-weight: 600;
             margin-bottom: 6px;
-        }
-        .feature-card p {
-            color: #6b7280;
+        }}
+        .feature-card p {{
+            color: {_card_p};
             font-size: 0.78rem;
             line-height: 1.5;
             margin: 0;
-        }
+        }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -461,6 +717,8 @@ def render_welcome_page():
         if st.button("Open Calculator", type="primary", use_container_width=True):
             st.session_state.show_calculator = True
             st.rerun()
+
+    render_site_footer()
 
 
 def render_instructions_tab():
@@ -820,6 +1078,10 @@ search_query = st.sidebar.text_input(
     help="Searches the SEC's bulk Form ADV dataset (~16K SEC-registered RIAs).",
 )
 _query_clean = (search_query or "").strip()
+# Tracks whether the matched-firms branch rendered its own merged
+# attribution+quota caption; if so we skip the standalone source caption
+# below to avoid duplication.
+_sec_source_caption_rendered = False
 if _query_clean and len(_query_clean) < 3:
     st.sidebar.caption("Type 3+ characters to search.")
 elif _query_clean:
@@ -835,16 +1097,20 @@ elif _query_clean:
             "bad_response": "Data source returned a non-parquet body.",
             "network_error": "Couldn't reach api.github.com.",
             "io_error": "Couldn't write the local cache.",
+            "unknown_error": "Unexpected error resolving the data source. Check Streamlit logs.",
         }.get(_adv_resolution_status(), "Data source check failed.")
         st.sidebar.caption(f"⚠ SEC data unavailable — {_status_msg}")
     else:
         _matches = sec_lookup.search_firms(_query_clean, _adv_df, limit=5)
         if _matches:
+            # Include a hash of the query in the widget key so a fresh search
+            # forces a fresh selectbox (Streamlit doesn't reset the closed-state
+            # label when `options` changes underneath a stable key).
             _sel_idx = st.sidebar.selectbox(
                 "Matching firms",
                 options=list(range(len(_matches))),
                 format_func=lambda i: f"{_fmt_aum_short(_matches[i].aum)} — {_matches[i].firm_name}",
-                key="sec_selected_idx",
+                key=f"sec_selected_idx_{hash(_query_clean)}",
             )
             _allowed, _remaining, _wait_sec = _sec_lookup_quota()
             if not _allowed:
@@ -864,16 +1130,32 @@ elif _query_clean:
                     )
                     st.session_state.pending_reconcile = True
                     st.rerun()
+                # Merged attribution + quota line — one caption is calmer
+                # than two stacked ones and conserves sidebar real estate.
                 st.sidebar.caption(
-                    f"{_remaining} of {SEC_LOOKUP_LIMIT} lookups remaining this session."
+                    f"Source: [SEC Form ADV](https://www.sec.gov/data-research/sec-markets-data/"
+                    f"information-about-registered-investment-advisers-exempt-reporting-advisers) "
+                    f"(public) · {_remaining}/{SEC_LOOKUP_LIMIT} lookups left."
                 )
+                _sec_source_caption_rendered = True
         else:
-            st.sidebar.caption("No matches.")
+            # Styled empty-state explaining our coverage and pointing
+            # state-only firms to IAPD instead of dead-ending the user.
+            # Escape '$' as '\$' — Streamlit otherwise interprets unescaped
+            # dollar signs as MathJax delimiters and renders the surrounded
+            # text in italic math font, mangling "$100M+ AUM".
+            st.sidebar.info(
+                "No match in our dataset. We currently cover ~16K "
+                "SEC-registered RIAs (\\$100M+ AUM). State-registered firms "
+                "(<\\$100M AUM) may be added soon — for now try the SEC's "
+                "[IAPD search](https://adviserinfo.sec.gov)."
+            )
 
-st.sidebar.caption(
-    "_Source: [SEC Form ADV](https://www.sec.gov/data-research/sec-markets-data/"
-    "information-about-registered-investment-advisers-exempt-reporting-advisers) (public)._"
-)
+if not _sec_source_caption_rendered:
+    st.sidebar.caption(
+        "_Source: [SEC Form ADV](https://www.sec.gov/data-research/sec-markets-data/"
+        "information-about-registered-investment-advisers-exempt-reporting-advisers) (public)._"
+    )
 
 # Loaded-firm banner + clear button. Sits at the bottom of the lookup block so
 # it's anchored to the lookup widget, not Target Firm.
@@ -881,6 +1163,15 @@ if st.session_state.sec_data is not None:
     _sec = st.session_state.sec_data
     _as_of = f" — as of {_sec.as_of_date}" if _sec.as_of_date else ""
     st.sidebar.caption(f"📄 SEC: **{_sec.firm_name}**{_as_of}")
+    # "Report incorrect data" mailto. urllib.parse.quote handles ampersands,
+    # accents, etc. in firm names so the subject line stays well-formed.
+    _report_subject = urllib.parse.quote(
+        f"ADV data issue: {_sec.firm_name} (CRD {_sec.crd})"
+    )
+    st.sidebar.markdown(
+        f"<small>[Report incorrect data](mailto:dhruvjani7@gmail.com?subject={_report_subject})</small>",
+        unsafe_allow_html=True,
+    )
     if st.sidebar.button("Clear SEC data", key="sec_clear_btn"):
         st.session_state.sec_data = None
         st.session_state.pending_reconcile = False
@@ -919,13 +1210,24 @@ if _sec is not None:
     _sec_field_badge("aum", int(_sec.aum), lambda v: f"${v:,.0f}", "AUM")
 
 annual_revenue = currency_input("Annual Revenue ($)", 4_000_000, "revenue")
+# Above ~$10B AUM the 0.75% blended-fee assumption breaks down (institutional
+# share classes, performance fees, family-office economics, etc.), so we
+# refuse to offer the estimate rather than risk anchoring the user on a
+# wrong number.
+_REV_ESTIMATE_AUM_CAP = 10e9
 if _sec is not None:
-    _sec_field_badge(
-        "revenue", int(_sec.estimated_revenue),
-        # Revenue isn't in ADV — this is AUM × 0.75% as a rough proxy. Loud
-        # disclaimer so it never lands in an IC memo as "filed revenue."
-        lambda v: f"${v:,.0f} · est only (AUM × 0.75%, not filed)", "Revenue",
-    )
+    if _sec.aum > _REV_ESTIMATE_AUM_CAP:
+        st.sidebar.caption(
+            "⚠ Revenue estimate disabled — blended fee rates vary too "
+            "much above $10B AUM. Enter manually."
+        )
+    else:
+        _sec_field_badge(
+            "revenue", int(_sec.estimated_revenue),
+            # Revenue isn't in ADV — this is AUM × 0.75% as a rough proxy. Loud
+            # disclaimer so it never lands in an IC memo as "filed revenue."
+            lambda v: f"${v:,.0f} · est only (AUM × 0.75%, not filed)", "Revenue",
+        )
 
 ebitda = currency_input("EBITDA ($)", 1_600_000, "ebitda")
 owner_comp = currency_input("Owner's Compensation ($)", 500_000, "owner_comp")
@@ -1003,14 +1305,22 @@ def _render_reconcile_dialog():
                  f"{int(st.session_state.get('num_clients', 200)):,}",
                  int(sec.num_clients), f"{int(sec.num_clients):,}")
 
-        est_rev = int(sec.estimated_revenue)
-        try:
-            cur_rev = int(float(str(st.session_state.get('revenue', '4,000,000'))
-                                 .replace(',', '').replace('$', '').strip()))
-        except (ValueError, TypeError):
-            cur_rev = 4_000_000
-        _row("revenue", "Annual Revenue · *estimate only* (AUM × 0.75%, not filed)",
-             f"${cur_rev:,}", est_rev, f"${est_rev:,}")
+        if sec.aum > _REV_ESTIMATE_AUM_CAP:
+            # Don't queue a revenue apply at all for very large firms — the
+            # 0.75% blended-fee assumption is too unreliable above $10B.
+            st.warning(
+                "Revenue estimate disabled — blended fee rates vary too "
+                "much above $10B AUM. Enter manually."
+            )
+        else:
+            est_rev = int(sec.estimated_revenue)
+            try:
+                cur_rev = int(float(str(st.session_state.get('revenue', '4,000,000'))
+                                     .replace(',', '').replace('$', '').strip()))
+            except (ValueError, TypeError):
+                cur_rev = 4_000_000
+            _row("revenue", "Annual Revenue · *estimate only* (AUM × 0.75%, not filed)",
+                 f"${cur_rev:,}", est_rev, f"${est_rev:,}")
 
         if sec.growth_rate is not None:
             raw_pct = sec.growth_rate * 100
@@ -1041,7 +1351,13 @@ def _render_reconcile_dialog():
                 st.toast(f"Applied {applied} SEC value{'s' if applied != 1 else ''}.", icon="✅")
             st.rerun()
         if c2.button("Cancel", use_container_width=True):
+            # Cancel = full bail-out. Previously this only cleared
+            # pending_reconcile, leaving the green SEC banner, the per-field
+            # revert badges, and the Clear-SEC-data button visible — a
+            # half-applied state that confused users. Wiping sec_data
+            # restores the sidebar to its pre-lookup shape.
             st.session_state.pending_reconcile = False
+            st.session_state.sec_data = None
             st.rerun()
 
     _dlg()
@@ -1252,15 +1568,33 @@ seller_proceeds = compute_seller_total_proceeds(
 # ==============================================================================
 # MAIN PANEL
 # ==============================================================================
-_hdr_left, _hdr_right = st.columns([5, 1])
+_hdr_left, _hdr_theme, _hdr_right = st.columns([5, 1, 1])
 with _hdr_left:
     st.markdown("# RIA M&A Calculator")
     st.markdown("*Buyer-side acquisition economics for Registered Investment Advisors*")
+with _hdr_theme:
+    st.markdown("<br>", unsafe_allow_html=True)
+    _theme_icon = "☀️" if _is_light() else "🌙"
+    st.button(
+        _theme_icon,
+        key="calc_theme_toggle",
+        on_click=_toggle_theme,
+        help="Toggle day/dark mode",
+        use_container_width=True,
+    )
 with _hdr_right:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Home", key="back_home", use_container_width=True):
         st.session_state.show_calculator = False
         st.rerun()
+
+# Compliance disclaimer — small but always visible above the tabs so a user
+# evaluating output never has to hunt for it. st.caption is unobtrusive vs.
+# st.info, which would compete with the tab nav for attention.
+st.caption(
+    "Estimates derived from SEC Form ADV public filings. Not investment advice. "
+    "Revenue estimated at 0.75% of AUM — actual figures vary by fee structure."
+)
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Deal Summary", "Pro Forma Financials", "Sensitivity Analysis",
@@ -1320,7 +1654,7 @@ with tab1:
         text=[fmt_dollar(v) for v in values] + [fmt_dollar(purchase_price)],
         textposition="outside",
     ))
-    fig_waterfall.update_layout(**PLOTLY_LAYOUT, title="Deal Structure Waterfall", height=400)
+    fig_waterfall.update_layout(**plotly_layout(), title="Deal Structure Waterfall", height=400)
     st.plotly_chart(fig_waterfall, use_container_width=True)
 
     st.markdown('<div class="section-header">Key Return Metrics</div>', unsafe_allow_html=True)
@@ -1422,7 +1756,7 @@ with tab2:
             line=dict(color=COLORS[4], width=2, dash="dot"), mode="lines+markers",
         ))
     fig_pf.update_layout(
-        **PLOTLY_LAYOUT,
+        **plotly_layout(),
         title="5-Year Financial Trajectory",
         yaxis_title="Dollars ($)",
         xaxis_title="Year",
@@ -1472,7 +1806,7 @@ with tab3:
         colorbar=dict(title="IRR %"),
     ))
     fig_hm1.update_layout(
-        **PLOTLY_LAYOUT,
+        **plotly_layout(),
         title="5-Year IRR by Multiple & Attrition Rate",
         xaxis_title="Client Attrition Rate",
         yaxis_title="Revenue Multiple",
@@ -1498,7 +1832,7 @@ with tab3:
         colorbar=dict(title="Years"),
     ))
     fig_hm2.update_layout(
-        **PLOTLY_LAYOUT,
+        **plotly_layout(),
         title="Breakeven Year by Growth Rate & Multiple",
         xaxis_title="Revenue Multiple",
         yaxis_title="Revenue Growth Rate",
@@ -1546,7 +1880,7 @@ with tab4:
             marker_color=COLORS[idx],
         ))
     fig_earnout.update_layout(
-        **PLOTLY_LAYOUT,
+        **plotly_layout(),
         title="Earnout Payouts by Year & Scenario",
         xaxis_title="Year", yaxis_title="Earnout Payment ($)",
         barmode="group", height=400,
@@ -1567,7 +1901,7 @@ with tab4:
     fig_seller.add_hline(y=purchase_price, line_dash="dash", line_color="#fc8181",
                          annotation_text="Purchase Price")
     fig_seller.update_layout(
-        **PLOTLY_LAYOUT,
+        **plotly_layout(),
         title="Cumulative Seller Proceeds (All Sources)",
         xaxis_title="Year", yaxis_title="Cumulative Proceeds ($)",
         height=400,
@@ -1635,7 +1969,7 @@ with tab5:
                 name="Balloon", marker_color=COLORS[2],
             ))
         fig_debt.update_layout(
-            **PLOTLY_LAYOUT,
+            **plotly_layout(),
             title="Loan Amortization: Principal vs Interest",
             xaxis_title="Year", yaxis_title="Dollars ($)",
             barmode="stack", height=400,
@@ -1662,7 +1996,7 @@ with tab5:
         fig_dscr.add_hline(y=1.25, line_dash="dash", line_color="#ed8936",
                            annotation_text="1.25x Target")
         fig_dscr.update_layout(
-            **PLOTLY_LAYOUT,
+            **plotly_layout(),
             title="DSCR by Year",
             xaxis_title="Year", yaxis_title="DSCR",
             height=400, showlegend=False,
@@ -1723,4 +2057,4 @@ if st.button("Export Full Analysis to PDF", type="primary"):
     except Exception as e:
         st.error(f"PDF generation failed: {e}")
 
-st.caption("RIA M&A Calculator | Built for buyer-side acquisition modeling")
+render_site_footer()

@@ -90,8 +90,14 @@ def _resolve_adv() -> dict:
         )
         _ADV_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(req, timeout=60) as resp:
-            _ADV_CACHE_PATH.write_bytes(resp.read())
-        return {"path": _ADV_CACHE_PATH, "status": "fetched"}
+            body = resp.read()
+        _ADV_CACHE_PATH.write_bytes(body)
+        n = len(body)
+        # Parquet files start with the 4-byte "PAR1" magic and end with it.
+        is_parquet = n > 8 and body[:4] == b"PAR1" and body[-4:] == b"PAR1"
+        if not is_parquet:
+            return {"path": None, "status": f"fetched_not_parquet_{n}b"}
+        return {"path": _ADV_CACHE_PATH, "status": f"fetched_{n}b"}
     except urllib.error.HTTPError as e:
         # Record only the HTTP status — no body, no headers, no URL.
         return {"path": None, "status": f"http_{e.code}"}
@@ -804,7 +810,14 @@ elif _query_clean:
             "http_404": "GitHub returned 404 — repo/file/branch not found (check `ADV_DATA_REPO`/`PATH`/`REF`).",
             "network_error": "Could not reach api.github.com from the app.",
             "io_error": "Could not write `/tmp` cache (filesystem issue).",
-        }.get(_status, f"Status: `{_status}`.")
+        }.get(_status)
+        if _status_msg is None:
+            if _status.startswith("fetched_not_parquet_"):
+                _status_msg = f"GitHub returned a non-parquet body ({_status.removeprefix('fetched_not_parquet_')}) — Accept header or response shape wrong."
+            elif _status.startswith("fetched_") and _status.endswith("b"):
+                _status_msg = f"Fetch succeeded ({_status}) but the DataFrame loaded empty — possible parquet read error."
+            else:
+                _status_msg = f"Status: `{_status}`."
         st.sidebar.caption(
             f"⚠ SEC data unavailable. {_status_msg} "
             "(Dev: run `scripts/build_adv_data.py` for a local file.)"

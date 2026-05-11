@@ -1411,15 +1411,28 @@ def _current_aum_int() -> int:
         return 500_000_000
 
 
+# Widget keys backed by currency_input() — text_input wrappers that require
+# their session_state value to be a comma-formatted string, not an int.
+_CURRENCY_INPUT_KEYS = {"aum", "revenue", "ebitda", "owner_comp", "purchase_price"}
+
+
 def _sec_field_badge(field_key: str, sec_value, fmt_fn, label: str):
     """Render a small caption + revert button below an input.
-    Clicking the button queues the SEC value for the input on the next rerun."""
+    Clicking the button queues the SEC value for the input on the next rerun.
+
+    Currency inputs need the queued value to be a comma-formatted string;
+    number_input and slider inputs need their native types. Mismatching
+    these types crashes the widget on the next rerun with a TypeError on
+    `text_input_proto.value = widget_state.value`."""
     if st.session_state.sec_data is None or sec_value is None:
         return
     col1, col2 = st.sidebar.columns([3, 1])
     col1.caption(f"SEC: {fmt_fn(sec_value)}")
     if col2.button("↺", key=f"revert_{field_key}", help=f"Use SEC value for {label}"):
-        _queue_apply(field_key, sec_value)
+        if field_key in _CURRENCY_INPUT_KEYS:
+            _queue_apply(field_key, f"{int(sec_value):,}")
+        else:
+            _queue_apply(field_key, sec_value)
         st.rerun()
 
 

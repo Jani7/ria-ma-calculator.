@@ -20,6 +20,7 @@ from calculations import (
     lookup_comps_band,
 )
 import sec_lookup
+import html as _html
 import tempfile
 import threading
 import urllib.parse
@@ -95,6 +96,20 @@ def _resolve_adv() -> dict:
     except Exception:
         # st.secrets may not be available in some local-dev contexts.
         pass
+
+    # Validate operator-controlled secret strings before splicing them into
+    # the GitHub Contents API URL. These are *operator* values (set on
+    # Streamlit Cloud), not user input, so this isn't an SSRF mitigation —
+    # it's a footgun guard: a stray space or backslash in the secret would
+    # otherwise build a broken URL or, in a contrived case, redirect the
+    # fetch to a different repo/branch.
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}", repo):
+        return {"path": None, "status": "bad_config"}
+    if not _re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", file_path):
+        return {"path": None, "status": "bad_config"}
+    if not _re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", ref):
+        return {"path": None, "status": "bad_config"}
 
     if not token:
         return {"path": None, "status": "no_token"}
@@ -1338,6 +1353,7 @@ elif _query_clean:
         # Status codes are PAT-safe (no token, URL, or exception text in them).
         _status_msg = {
             "no_token": "`ADV_DATA_TOKEN` secret not set on Streamlit Cloud.",
+            "bad_config": "One of the `ADV_DATA_*` secrets has invalid characters.",
             "http_401": "PAT is invalid or expired.",
             "http_403": "PAT lacks Contents:read on the data repo.",
             "http_404": "Data repo/file/branch not found.",
@@ -1430,7 +1446,7 @@ if st.session_state.sec_data is not None:
                     color: #c5cad6;
                     line-height: 1.4;">
             <span style="color:#4ade80; font-weight:600;">● SEC loaded</span><br>
-            <span style="color:#e5e9f0;">{_sec.firm_name}</span>
+            <span style="color:#e5e9f0;">{_html.escape(_sec.firm_name)}</span>
             <span style="color:#6b7385; font-size:0.72rem;">{_as_of}</span>
         </div>
         """,
@@ -1570,7 +1586,7 @@ def _render_reconcile_dialog():
         # Full firm name + as-of date in a single subtitle line.
         st.markdown(
             f"<div style='color:#c5cad6; font-size:0.92rem; font-weight:500; "
-            f"margin: -4px 0 4px 0;'>{sec.firm_name}</div>",
+            f"margin: -4px 0 4px 0;'>{_html.escape(sec.firm_name)}</div>",
             unsafe_allow_html=True,
         )
         st.caption(
@@ -2000,7 +2016,7 @@ if st.session_state.sec_data is not None and st.session_state.sec_data.aum > 10e
     st.markdown(
         f"""
         <div class="mega-banner">
-            <strong>Heads up &mdash;</strong> {_mega.firm_name}
+            <strong>Heads up &mdash;</strong> {_html.escape(_mega.firm_name)}
             ({fmt_dollar(_mega.aum)} AUM) is above this calculator&rsquo;s typical
             deal-size range (~\\$100M&ndash;\\$10B AUM). Revenue and purchase price
             weren&rsquo;t auto-scaled. Enter a realistic deal size in the sidebar
@@ -2949,6 +2965,11 @@ if st.button("Export Full Analysis to PDF", type="primary"):
     except ImportError:
         st.warning("PDF export requires the `fpdf2` package. Install with: pip install fpdf2")
     except Exception as e:
-        st.error(f"PDF generation failed: {e}")
+        # Don't surface raw exception text — it can leak file paths or
+        # other internals into the browser. Log type + message server-side
+        # via Streamlit Cloud's container logs; show a generic message.
+        import logging
+        logging.exception("PDF generation failed (%s)", type(e).__name__)
+        st.error("PDF generation failed. Please try again or contact support if the issue persists.")
 
 render_site_footer()

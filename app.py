@@ -246,7 +246,32 @@ _DARK_CSS = """
 
 _LIGHT_CSS = """
 <style>
-    .stApp { background-color: #ffffff; color: #1a202c; }
+    /* Override Streamlit's hard-coded dark theme variables from
+       .streamlit/config.toml. These take CSS-variable precedence over our
+       per-element rules below, so we have to flip them at the root. */
+    :root, .stApp, [data-theme] {
+        --primary-color: #2b6cb0 !important;
+        --background-color: #ffffff !important;
+        --secondary-background-color: #f7fafc !important;
+        --text-color: #1a202c !important;
+        --font: "sans serif" !important;
+    }
+    .stApp { background-color: #ffffff !important; color: #1a202c !important; }
+    /* Sidebar — force light gray over Streamlit's runtime dark value. */
+    section[data-testid="stSidebar"],
+    div[data-testid="stSidebar"],
+    div[data-testid="stSidebar"] > div {
+        background-color: #f7fafc !important;
+        color: #1a202c !important;
+    }
+    div[data-testid="stSidebar"] * { color: #1a202c !important; }
+    div[data-testid="stSidebar"] a { color: #2b6cb0 !important; }
+    /* Markdown text in the main pane. */
+    .stMarkdown, .stMarkdown p, .stMarkdown li,
+    label, .stCaption, .stTextInput label, .stNumberInput label,
+    .stSlider label, .stSelectbox label, .stRadio label {
+        color: #1a202c !important;
+    }
     .metric-card {
         background: linear-gradient(135deg, #f7fafc 0%, #edf2f7 100%);
         border: 1px solid #cbd5e0;

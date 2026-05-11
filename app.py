@@ -176,6 +176,34 @@ _DARK_CSS = """
     }
     div[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
     div[data-testid="stSidebar"] a { color: #63b3ed !important; }
+    /* Primary buttons — Streamlit's default red doesn't fit the brand.
+       Override explicitly because the --primary-color CSS variable
+       doesn't reach the button's background-color rule. */
+    .stButton > button[kind="primary"],
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+        background-color: #4a90d9 !important;
+        color: #ffffff !important;
+        border: 1px solid #4a90d9 !important;
+    }
+    .stButton > button[kind="primary"]:hover,
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+        background-color: #3a7bc8 !important;
+        border-color: #3a7bc8 !important;
+        color: #ffffff !important;
+    }
+    /* Secondary buttons in dark theme — light grey border, dark fill. */
+    .stButton > button:not([kind="primary"]),
+    div[data-testid="stSidebar"] .stButton > button:not([kind="primary"]) {
+        background-color: #1a1f2e !important;
+        color: #e2e8f0 !important;
+        border: 1px solid #2d3748 !important;
+    }
+    .stButton > button:not([kind="primary"]):hover,
+    div[data-testid="stSidebar"] .stButton > button:not([kind="primary"]):hover {
+        background-color: #2d3748 !important;
+        border-color: #4a90d9 !important;
+        color: #4a90d9 !important;
+    }
     .metric-card {
         background: linear-gradient(135deg, #1a1f2e 0%, #16192b 100%);
         border: 1px solid #2d3748;

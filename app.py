@@ -560,7 +560,7 @@ def render_site_footer():
     st.markdown(
         f"""
         <div class="site-footer">
-            RIA M&amp;A Calculator &middot; RAUM in Dollars &middot;
+            RIA M&amp;A Calculator &middot;
             Source: <a href="{sec_url}" target="_blank" rel="noopener">SEC Form ADV</a><br>
             All information is derived from publicly available SEC Form ADV filings and is
             provided for informational purposes only. Firm data and other metrics are
@@ -1273,6 +1273,24 @@ def currency_input(label, default, key, help_text=None):
         return default
 
 
+def count_input(label, default, key, help_text=None):
+    """Like currency_input but for plain integer counts (no $ prefix).
+    Used for client counts and similar so the displayed value gets
+    comma-separated like the dollar fields ('322,130' not '322130')."""
+    if key not in st.session_state:
+        st.session_state[key] = f"{default:,}"
+    raw = st.sidebar.text_input(label, key=key, help=help_text)
+    try:
+        cleaned = raw.replace(",", "").replace(" ", "").strip()
+        val = int(float(cleaned))
+        if raw != f"{val:,}" and raw == cleaned:
+            st.sidebar.caption(f"= {val:,}")
+        return val
+    except (ValueError, TypeError):
+        st.sidebar.error(f"Invalid number: {raw}")
+        return default
+
+
 # ==============================================================================
 # WELCOME PAGE GATE
 # ==============================================================================
@@ -1449,6 +1467,8 @@ def _current_aum_int() -> int:
 # Widget keys backed by currency_input() — text_input wrappers that require
 # their session_state value to be a comma-formatted string, not an int.
 _CURRENCY_INPUT_KEYS = {"aum", "revenue", "ebitda", "owner_comp", "purchase_price"}
+# Plain-integer text inputs (no $ prefix) — queue values as comma strings.
+_COUNT_INPUT_KEYS = {"num_clients"}
 
 
 def _sec_field_badge(field_key: str, sec_value, fmt_fn, label: str):
@@ -1464,7 +1484,7 @@ def _sec_field_badge(field_key: str, sec_value, fmt_fn, label: str):
     col1, col2 = st.sidebar.columns([3, 1])
     col1.caption(f"SEC: {fmt_fn(sec_value)}")
     if col2.button("↺", key=f"revert_{field_key}", help=f"Use SEC value for {label}"):
-        if field_key in _CURRENCY_INPUT_KEYS:
+        if field_key in _CURRENCY_INPUT_KEYS or field_key in _COUNT_INPUT_KEYS:
             _queue_apply(field_key, f"{int(sec_value):,}")
         else:
             _queue_apply(field_key, sec_value)
@@ -1502,11 +1522,7 @@ if _sec is not None:
 ebitda = currency_input("EBITDA ($)", 1_600_000, "ebitda")
 owner_comp = currency_input("Owner's Compensation ($)", 500_000, "owner_comp")
 
-if "num_clients" not in st.session_state:
-    st.session_state["num_clients"] = 200
-num_clients = st.sidebar.number_input(
-    "Number of Clients", step=10, key="num_clients"
-)
+num_clients = count_input("Number of Clients", 200, "num_clients")
 if _sec is not None and _sec.num_clients and _sec.num_clients > 0:
     _sec_field_badge(
         "num_clients", int(_sec.num_clients), lambda v: f"{v:,}", "Clients"
@@ -1623,7 +1639,7 @@ def _render_reconcile_dialog():
             applied_keys: set[str] = set()
             for key, (choice, sec_value) in decisions.items():
                 if choice.startswith("SEC:"):
-                    if key in ("aum", "revenue"):
+                    if key in ("aum", "revenue", "num_clients"):
                         _queue_apply(key, f"{int(sec_value):,}")
                     else:
                         _queue_apply(key, sec_value)
@@ -1849,12 +1865,16 @@ _int_expense_base = st.session_state.get("int_expense_base", _default_expense_ba
 _int_cost_takeout_pct = st.session_state.get("int_cost_takeout_pct", 0.14)
 _int_revenue_uplift_pct = st.session_state.get("int_revenue_uplift_pct", 0.07)
 _int_capture_multiple = st.session_state.get("int_capture_multiple", 1.25)
+# has_compliance_team and has_cco_redundancy were two checkboxes for the same
+# capability — a CCO sits inside the compliance function. We surface one
+# checkbox in the UI now and feed both keys to keep the synergy weighting
+# unchanged downstream.
 _int_buyer_profile = {
     "has_compliance_team": st.session_state.get("int_buyer_compliance", True),
+    "has_cco_redundancy": st.session_state.get("int_buyer_compliance", True),
     "has_tech_stack": st.session_state.get("int_buyer_tech", True),
     "has_planning_shop": st.session_state.get("int_buyer_planning", False),
     "has_back_office": st.session_state.get("int_buyer_backoffice", True),
-    "has_cco_redundancy": st.session_state.get("int_buyer_cco", False),
 }
 
 synergy_schedule = compute_synergy_schedule(
@@ -2649,21 +2669,21 @@ with tab5:
 # ==============================================================================
 with tab7:
     st.markdown(
-        '<div class="section-header">Integration Strategy & Synergy Framework</div>',
+        '<div class="section-header">Integration Strategy</div>',
         unsafe_allow_html=True,
     )
     st.caption(
-        "Models synergy realization as a real ramp curve (banker-MD memo, Part E): "
-        "cost takeout from buyer-target overlap, revenue uplift from fee "
-        "harmonization and wallet share, less one-time capture cost. Default "
-        "assumptions reflect a $500M-AUM target tucked into a $1B+ buyer."
+        "What the deal is worth *after* you close it. Two levers create value: "
+        "cost takeout (eliminate overlapping seats, systems, and overhead) and "
+        "revenue uplift (harmonize fees, sell additional services to the "
+        "acquired book). Both ramp over years 1-3; both cost money to capture."
     )
 
     if use_manual_integration:
         st.warning(
-            "Manual override is ON in the sidebar. The pro forma is currently "
-            "using the flat integration_costs / annual_synergies inputs, not "
-            "this schedule. Toggle it off to apply the framework."
+            "Manual override is ON in the sidebar. The pro forma is using your "
+            "flat integration cost and annual synergy inputs, not the schedule "
+            "below. Turn the override off to see this framework drive the deal."
         )
 
     # ---- Inputs ----
@@ -2677,54 +2697,60 @@ with tab7:
         _auto_expense = max(0.0, float(annual_revenue) - float(ebitda))
         _default_exp = int(st.session_state.get("int_expense_base", _auto_expense))
         _int_expense_base_w = st.number_input(
-            "Target expense base ($)",
+            "Target's annual expenses ($)",
             value=_default_exp,
             min_value=0,
             step=50_000,
             key="_w_int_expense_base",
-            help="Defaults to revenue minus EBITDA. Override if the target's "
-                 "reported expenses differ from the implied figure.",
+            help="The target firm's total operating expenses before owner "
+                 "comp adjustments. We pre-fill this from Revenue − EBITDA "
+                 "as a starting point; override with the actual figure from "
+                 "the target's financials if you have it.",
         )
         st.session_state["int_expense_base"] = _int_expense_base_w
-        st.caption(f"Auto-computed default: ${_auto_expense:,.0f} "
-                   f"(revenue minus EBITDA)")
+        st.caption(
+            f"Starting value: ${_auto_expense:,.0f} "
+            f"(your inputs: Revenue ${annual_revenue:,.0f} − EBITDA ${ebitda:,.0f}). "
+            "Edit if diligence shows a different number."
+        )
     with in2:
-        st.markdown("**Buyer profile** (drives capability factor)")
+        st.markdown("**What the buyer already has** (limits overlap synergies)")
         _bp_compliance = st.checkbox(
-            "Has compliance team (CCO/legal redundancy)",
+            "Compliance & CCO function",
             value=st.session_state.get("int_buyer_compliance", True),
-            key="_w_int_buyer_compliance")
+            key="_w_int_buyer_compliance",
+            help="If the buyer already has its own Chief Compliance Officer, "
+                 "legal team, and ADV registration, the target's redundant "
+                 "headcount can be cut.")
         _bp_tech = st.checkbox(
-            "Has overlapping tech stack",
+            "Overlapping tech stack (CRM, portfolio accounting)",
             value=st.session_state.get("int_buyer_tech", True),
             key="_w_int_buyer_tech")
         _bp_backoffice = st.checkbox(
-            "Has back-office ops to absorb",
+            "Back-office operations team",
             value=st.session_state.get("int_buyer_backoffice", True),
             key="_w_int_buyer_backoffice")
         _bp_planning = st.checkbox(
-            "Has planning shop (drives wallet share)",
+            "Financial planning shop",
             value=st.session_state.get("int_buyer_planning", False),
-            key="_w_int_buyer_planning")
-        _bp_cco = st.checkbox(
-            "Has CCO-level redundancy",
-            value=st.session_state.get("int_buyer_cco", False),
-            key="_w_int_buyer_cco")
+            key="_w_int_buyer_planning",
+            help="A buyer with an in-house planning team can sell additional "
+                 "services to the acquired book, expanding wallet share.")
         st.session_state["int_buyer_compliance"] = _bp_compliance
         st.session_state["int_buyer_tech"] = _bp_tech
         st.session_state["int_buyer_backoffice"] = _bp_backoffice
         st.session_state["int_buyer_planning"] = _bp_planning
-        st.session_state["int_buyer_cco"] = _bp_cco
 
     sl1, sl2, sl3 = st.columns(3)
     with sl1:
         _cot = st.slider(
-            "Cost takeout (% of target expense base)",
+            "Cost takeout (% of target expenses)",
             min_value=10.0, max_value=18.0,
             value=float(st.session_state.get("int_cost_takeout_pct", 0.14)) * 100,
             step=0.5, key="_w_int_cost_takeout_pct",
-            help="Banker range 10-18%. Compliance/legal, tech stack, office, "
-                 "back-office. 50-70% of addressable is realistic capture.",
+            help="Realistic capture from eliminating overlapping seats, "
+                 "tech licenses, office space, and back-office workflows. "
+                 "Industry benchmark: 10-18% of the target's expense base.",
         ) / 100
         st.session_state["int_cost_takeout_pct"] = _cot
     with sl2:
@@ -2733,28 +2759,31 @@ with tab7:
             min_value=5.0, max_value=10.0,
             value=float(st.session_state.get("int_revenue_uplift_pct", 0.07)) * 100,
             step=0.5, key="_w_int_revenue_uplift_pct",
-            help="Banker range 5-10% by Y3. Fee-rate harmonization, "
-                 "wallet share, brand-referral lift.",
+            help="Fee harmonization on the acquired book + additional "
+                 "services (planning, tax, insurance) + brand-driven referrals. "
+                 "Realistic by year 3: 5-10% of target revenue.",
         ) / 100
         st.session_state["int_revenue_uplift_pct"] = _rev
     with sl3:
         _cap = st.slider(
-            "Capture cost multiple (x annual run-rate)",
+            "One-time capture cost (× annual synergy run-rate)",
             min_value=1.0, max_value=1.5,
             value=float(st.session_state.get("int_capture_multiple", 1.25)),
             step=0.05, key="_w_int_capture_multiple",
-            help="One-time integration cost as a multiple of annual run-rate "
-                 "synergy. Spread 60/30/10 across Y1-Y3.",
+            help="Severance, tech migration, advisor retention bonuses, "
+                 "and dual-running systems during the transition. Industry "
+                 "rule of thumb: $1.00-1.50 of one-time spend per $1.00 of "
+                 "annual run-rate synergy. Spread 60/30/10 across years 1-3.",
         )
         st.session_state["int_capture_multiple"] = _cap
 
     # Rebuild for this tab's display.
     _live_buyer_profile = {
         "has_compliance_team": _bp_compliance,
+        "has_cco_redundancy": _bp_compliance,  # CCO is part of the compliance function
         "has_tech_stack": _bp_tech,
         "has_planning_shop": _bp_planning,
         "has_back_office": _bp_backoffice,
-        "has_cco_redundancy": _bp_cco,
     }
     schedule = compute_synergy_schedule(
         target_revenue=annual_revenue,
@@ -2857,16 +2886,17 @@ with tab7:
                     "Capture Cost", "Net Synergy", "Cumulative"]
     st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    # ---- Sanity-check caption ----
+    # ---- Worked example ----
     st.markdown("---")
+    st.markdown("**Worked example**")
     st.caption(
-        "Sanity check (banker memo worked example): a $400M-AUM target with "
-        "$3.2M revenue and $2M expense base, tucked into a full-overlap $1B+ "
-        "buyer at default sliders (14% cost takeout / 7% revenue uplift / "
-        "1.25x capture), yields total Y3+ run-rate synergy of approximately "
-        "$488K (about 15% of revenue) with approximately $610K total capture "
-        "cost. The framework above produces approximately $504K run-rate and "
-        "$630K capture for those inputs."
+        "A $400M-AUM target with $3.2M revenue and $2M of annual expenses, "
+        "acquired by a $1B+ buyer with a full compliance/tech/back-office "
+        "stack: at default settings (14% cost takeout, 7% revenue uplift, "
+        "1.25× capture), expect roughly **$500K/year of run-rate synergy** "
+        "by year 3 (≈15% of target revenue) for a **one-time integration "
+        "spend of ~$630K**. The schedule above adjusts those numbers for "
+        "your specific inputs."
     )
 
 

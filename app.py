@@ -28,16 +28,14 @@ _ADV_CACHE_PATH = Path(tempfile.gettempdir()) / "ria_adv_cache" / "adv_current.p
 _ADV_LOCAL_PATH = Path(__file__).parent / "data" / "adv_current.parquet"
 
 
-# Records *why* the last data resolution failed, for surfacing a useful UI
-# message without ever leaking the PAT. Set by `_ensure_adv_data_path()`.
-# Only the status code is stored — no token, no URL, no exception text.
-_adv_status: str = "unset"
-
-
 @st.cache_resource(show_spinner="Fetching SEC ADV data…")
-def _ensure_adv_data_path():
+def _resolve_adv() -> dict:
     """Resolve the parquet location, downloading from a private GitHub repo
-    if no local copy exists. Returns a Path or None when nothing is available.
+    if no local copy exists.
+
+    Returns a dict with:
+        "path":   Path | None      — the parquet file, or None if unavailable
+        "status": str               — short code for the UI to render (PAT-safe)
 
     Resolution order:
         1. Local dev file at data/adv_current.parquet (gitignored)
@@ -49,17 +47,13 @@ def _ensure_adv_data_path():
            ADV_DATA_REF  (default "main").
         4. None — UI shows "data unavailable" caption.
 
-    Sets the module global `_adv_status` so the UI can surface a useful
-    diagnostic without revealing the PAT or other internals.
+    The status code is intentionally minimal (e.g. "http_403") — no token,
+    URL, or exception text is ever stored, so this dict is safe to log.
     """
-    global _adv_status
-
     if _ADV_LOCAL_PATH.exists():
-        _adv_status = "local"
-        return _ADV_LOCAL_PATH
+        return {"path": _ADV_LOCAL_PATH, "status": "local"}
     if _ADV_CACHE_PATH.exists():
-        _adv_status = "cache"
-        return _ADV_CACHE_PATH
+        return {"path": _ADV_CACHE_PATH, "status": "cache"}
 
     token = None
     repo = "Jani7/ria-ma-data"
@@ -79,8 +73,7 @@ def _ensure_adv_data_path():
         pass
 
     if not token:
-        _adv_status = "no_token"
-        return None
+        return {"path": None, "status": "no_token"}
 
     try:
         # Contents API with Accept: application/vnd.github.raw returns the
@@ -98,18 +91,22 @@ def _ensure_adv_data_path():
         _ADV_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         with urllib.request.urlopen(req, timeout=60) as resp:
             _ADV_CACHE_PATH.write_bytes(resp.read())
-        _adv_status = "fetched"
-        return _ADV_CACHE_PATH
+        return {"path": _ADV_CACHE_PATH, "status": "fetched"}
     except urllib.error.HTTPError as e:
         # Record only the HTTP status — no body, no headers, no URL.
-        _adv_status = f"http_{e.code}"
-        return None
+        return {"path": None, "status": f"http_{e.code}"}
     except urllib.error.URLError:
-        _adv_status = "network_error"
-        return None
+        return {"path": None, "status": "network_error"}
     except OSError:
-        _adv_status = "io_error"
-        return None
+        return {"path": None, "status": "io_error"}
+
+
+def _ensure_adv_data_path():
+    return _resolve_adv()["path"]
+
+
+def _adv_resolution_status() -> str:
+    return _resolve_adv()["status"]
 
 
 @st.cache_data(show_spinner=False)
@@ -797,8 +794,9 @@ if _query_clean and len(_query_clean) < 3:
 elif _query_clean:
     _adv_df = _load_adv_df()
     if _adv_df.empty:
-        # Surface the resolution status from _ensure_adv_data_path so we can
-        # debug remote setup issues without revealing the PAT.
+        # Surface the resolution status from _resolve_adv() so we can debug
+        # remote setup issues without revealing the PAT.
+        _status = _adv_resolution_status()
         _status_msg = {
             "no_token": "`ADV_DATA_TOKEN` secret is not set on Streamlit Cloud.",
             "http_401": "GitHub returned 401 — PAT is invalid or expired.",
@@ -806,7 +804,7 @@ elif _query_clean:
             "http_404": "GitHub returned 404 — repo/file/branch not found (check `ADV_DATA_REPO`/`PATH`/`REF`).",
             "network_error": "Could not reach api.github.com from the app.",
             "io_error": "Could not write `/tmp` cache (filesystem issue).",
-        }.get(_adv_status, f"Status: `{_adv_status}`.")
+        }.get(_status, f"Status: `{_status}`.")
         st.sidebar.caption(
             f"⚠ SEC data unavailable. {_status_msg} "
             "(Dev: run `scripts/build_adv_data.py` for a local file.)"

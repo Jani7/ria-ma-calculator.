@@ -133,8 +133,17 @@ def _adv_resolution_status() -> str:
 
 
 @st.cache_data(show_spinner=False)
+def _load_adv_df_by_path(path_str: str):
+    """Cached by path string so the cache invalidates when the resolved
+    path changes (e.g. None → /tmp/... after a fix to the secret/PAT)."""
+    if not path_str:
+        return sec_lookup.load_adv_data(None)
+    return sec_lookup.load_adv_data(Path(path_str))
+
+
 def _load_adv_df():
-    return sec_lookup.load_adv_data(_ensure_adv_data_path())
+    p = _ensure_adv_data_path()
+    return _load_adv_df_by_path(str(p) if p else "")
 
 # -- Page config ---------------------------------------------------------------
 st.set_page_config(page_title="RIA M&A Calculator", page_icon="📊", layout="wide")
@@ -820,6 +829,10 @@ elif _query_clean:
         # Surface the resolution status from _resolve_adv() so we can debug
         # remote setup issues without revealing the PAT.
         _status = _adv_resolution_status()
+        # If the resolve says success but the df is empty, the issue is in
+        # the load/cache layer. Tack that on so we don't chase the wrong leg.
+        if _status in ("local", "cache") or _status.startswith("fetched_"):
+            _status = f"{_status}_but_empty_df"
         _status_msg = {
             "no_token": "`ADV_DATA_TOKEN` secret is not set on Streamlit Cloud.",
             "http_401": "GitHub returned 401 — PAT is invalid or expired.",

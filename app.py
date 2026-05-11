@@ -15,11 +15,86 @@ from calculations import (
     sensitivity_irr, sensitivity_breakeven,
 )
 import sec_lookup
+import json
+import tempfile
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+# Where the runtime-downloaded parquet lives. /tmp on Streamlit Cloud is
+# writable and persists for the container's lifetime (cold starts re-fetch).
+_ADV_CACHE_PATH = Path(tempfile.gettempdir()) / "ria_adv_cache" / "adv_current.parquet"
+
+# Local dev fallback — gitignored, populated by scripts/build_adv_data.py.
+_ADV_LOCAL_PATH = Path(__file__).parent / "data" / "adv_current.parquet"
+
+
+@st.cache_resource(show_spinner="Fetching SEC ADV data…")
+def _ensure_adv_data_path():
+    """Resolve the parquet location, downloading from private GitHub release
+    if no local copy exists. Returns a Path or None when nothing is available.
+
+    Resolution order:
+        1. Local dev file at data/adv_current.parquet (gitignored)
+        2. /tmp cache from a prior fetch in this container
+        3. Private GitHub release, authenticated with secrets ADV_DATA_TOKEN
+           and (optional) ADV_DATA_REPO + ADV_DATA_ASSET.
+        4. None — UI shows "data unavailable" caption.
+    """
+    if _ADV_LOCAL_PATH.exists():
+        return _ADV_LOCAL_PATH
+    if _ADV_CACHE_PATH.exists():
+        return _ADV_CACHE_PATH
+
+    token = None
+    repo = "Jani7/ria-ma-data"
+    asset_name = "adv_current.parquet"
+    try:
+        if "ADV_DATA_TOKEN" in st.secrets:
+            token = st.secrets["ADV_DATA_TOKEN"]
+        if "ADV_DATA_REPO" in st.secrets:
+            repo = st.secrets["ADV_DATA_REPO"]
+        if "ADV_DATA_ASSET" in st.secrets:
+            asset_name = st.secrets["ADV_DATA_ASSET"]
+    except (FileNotFoundError, Exception):
+        pass
+
+    if not token:
+        return None
+
+    try:
+        api = f"https://api.github.com/repos/{repo}/releases/latest"
+        req = urllib.request.Request(
+            api,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "ria-ma-calculator",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            release = json.loads(resp.read())
+        asset = next(a for a in release["assets"] if a["name"] == asset_name)
+        dl_req = urllib.request.Request(
+            asset["url"],
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/octet-stream",
+                "User-Agent": "ria-ma-calculator",
+            },
+        )
+        _ADV_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(dl_req, timeout=60) as resp:
+            _ADV_CACHE_PATH.write_bytes(resp.read())
+        return _ADV_CACHE_PATH
+    except (urllib.error.URLError, KeyError, StopIteration, json.JSONDecodeError):
+        return None
 
 
 @st.cache_data(show_spinner=False)
 def _load_adv_df():
-    return sec_lookup.load_adv_data()
+    return sec_lookup.load_adv_data(_ensure_adv_data_path())
 
 # -- Page config ---------------------------------------------------------------
 st.set_page_config(page_title="RIA M&A Calculator", page_icon="📊", layout="wide")

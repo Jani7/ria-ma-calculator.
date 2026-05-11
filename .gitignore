@@ -42,3 +42,7 @@ ehthumbs.db
 venv/
 .venv/
 env/
+
+# Private SEC ADV snapshot — fetched at runtime from private GitHub release
+data/adv_current.parquet
+data/adv_*.parquet

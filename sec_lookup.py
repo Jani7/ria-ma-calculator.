@@ -52,17 +52,22 @@ class FirmData:
         return self.aum * DEFAULT_FEE_RATE
 
 
-def load_adv_data() -> pd.DataFrame:
-    """Read the bundled Parquet snapshot. Returns empty DataFrame on
-    missing file so the app degrades gracefully rather than crashing."""
-    if not DATA_PATH.exists():
-        return pd.DataFrame(
-            columns=[
-                "crd", "firm_name", "aum", "num_clients",
-                "num_accounts", "as_of_date", "aum_prior_year",
-            ]
-        )
-    return pd.read_parquet(DATA_PATH)
+EMPTY_COLUMNS = [
+    "crd", "firm_name", "aum", "num_clients",
+    "num_accounts", "as_of_date", "aum_prior_year",
+]
+
+
+def load_adv_data(data_path: Optional[Path] = None) -> pd.DataFrame:
+    """Read the Parquet snapshot. Returns empty DataFrame on missing file
+    so the app degrades gracefully rather than crashing.
+
+    Callers can pass an explicit path (e.g., a /tmp cache populated from
+    private storage); defaults to the bundled DATA_PATH for local dev."""
+    path = data_path if data_path is not None else DATA_PATH
+    if path is None or not Path(path).exists():
+        return pd.DataFrame(columns=EMPTY_COLUMNS)
+    return pd.read_parquet(path)
 
 
 def search_firms(query: str, df: pd.DataFrame, limit: int = 10) -> list[FirmMatch]:

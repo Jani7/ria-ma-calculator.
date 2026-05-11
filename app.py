@@ -1433,6 +1433,7 @@ def _render_reconcile_dialog():
         c1, c2 = st.columns(2)
         if c1.button("Apply selected", type="primary", use_container_width=True):
             applied = 0
+            applied_keys: set[str] = set()
             for key, (choice, sec_value) in decisions.items():
                 if choice.startswith("SEC:"):
                     if key in ("aum", "revenue"):
@@ -1440,9 +1441,26 @@ def _render_reconcile_dialog():
                     else:
                         _queue_apply(key, sec_value)
                     applied += 1
+                    applied_keys.add(key)
+            # When the user accepts SEC revenue, auto-scale the purchase
+            # price to 2× revenue (standard RIA M&A multiple). Without this,
+            # a $326B AUM firm would keep the default $8M purchase price
+            # and every downstream multiple (Rev Multiple, % of AUM, IRR,
+            # EBOC multiple) would render as ~0. We only auto-suggest;
+            # the user can still override in the sidebar.
+            if "revenue" in applied_keys:
+                applied_revenue = next(
+                    sv for k, (c, sv) in decisions.items()
+                    if k == "revenue" and c.startswith("SEC:")
+                )
+                _queue_apply("purchase_price", f"{int(2 * applied_revenue):,}")
             st.session_state.pending_reconcile = False
             if applied:
-                st.toast(f"Applied {applied} SEC value{'s' if applied != 1 else ''}.", icon="✅")
+                st.toast(
+                    f"Applied {applied} SEC value{'s' if applied != 1 else ''}"
+                    + (" + auto-scaled purchase price (2× revenue)." if "revenue" in applied_keys else "."),
+                    icon="✅",
+                )
             st.rerun()
         if c2.button("Cancel", use_container_width=True):
             # Cancel = full bail-out. Previously this only cleared
@@ -1681,6 +1699,19 @@ with _hdr_right:
     if st.button("Home", key="back_home", use_container_width=True):
         st.session_state.show_calculator = False
         st.rerun()
+
+# Out-of-scope warning for mega-RIAs. When AUM > $10B the revenue proxy is
+# disabled (fee structures vary too much) so we couldn't auto-scale the
+# purchase price either — the analytics below would render as ~0 against
+# the default $8M. Flag it loudly so the user knows to enter a realistic
+# deal size or switch to the "Select Multiple" purchase-price method.
+if st.session_state.sec_data is not None and st.session_state.sec_data.aum > 10e9:
+    st.warning(
+        f"**{st.session_state.sec_data.firm_name}** ({fmt_dollar(st.session_state.sec_data.aum)} AUM) "
+        "is above this calculator's typical deal-size range "
+        "(~\\$100M–\\$10B AUM). Revenue and purchase price weren't auto-scaled — "
+        "enter a realistic deal size in the sidebar before reading the analytics."
+    )
 
 # Compliance disclaimer — small but always visible above the tabs so a user
 # evaluating output never has to hunt for it. st.caption is unobtrusive vs.

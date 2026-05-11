@@ -100,6 +100,36 @@ if "pending_reconcile" not in st.session_state:
     st.session_state.pending_reconcile = False
 if "pending_apply" not in st.session_state:
     st.session_state.pending_apply = {}  # {widget_key: value}
+if "sec_lookup_history" not in st.session_state:
+    st.session_state.sec_lookup_history = []  # epoch seconds of past loads
+
+# Per-session rate limit for SEC lookups. The bulk Form ADV data is itself
+# public (we just preprocess it), so this isn't about gating access — it's
+# about making automated harvesting of the live UI uneconomical. A human
+# evaluating M&A targets won't bump up against 25/30min.
+SEC_LOOKUP_LIMIT = 25
+SEC_LOOKUP_WINDOW_SEC = 30 * 60
+
+
+def _sec_lookup_quota() -> tuple[bool, int, int]:
+    """Returns (allowed, remaining, seconds_until_oldest_expires)."""
+    import time
+    now = time.time()
+    st.session_state.sec_lookup_history = [
+        t for t in st.session_state.sec_lookup_history
+        if now - t < SEC_LOOKUP_WINDOW_SEC
+    ]
+    used = len(st.session_state.sec_lookup_history)
+    remaining = max(0, SEC_LOOKUP_LIMIT - used)
+    wait = 0
+    if used >= SEC_LOOKUP_LIMIT:
+        wait = int(SEC_LOOKUP_WINDOW_SEC - (now - min(st.session_state.sec_lookup_history)))
+    return remaining > 0, remaining, wait
+
+
+def _record_sec_lookup():
+    import time
+    st.session_state.sec_lookup_history.append(time.time())
 
 
 def _queue_apply(widget_key: str, value):
@@ -662,7 +692,7 @@ if search_query and len(search_query.strip()) >= 3:
     if _adv_df.empty:
         st.sidebar.caption("⚠ SEC data file not found. Run `scripts/build_adv_data.py`.")
     else:
-        _matches = sec_lookup.search_firms(search_query, _adv_df)
+        _matches = sec_lookup.search_firms(search_query, _adv_df, limit=5)
         if _matches:
             _sel_idx = st.sidebar.selectbox(
                 "Matching firms",
@@ -670,14 +700,31 @@ if search_query and len(search_query.strip()) >= 3:
                 format_func=lambda i: f"{_matches[i].firm_name} (AUM ${_matches[i].aum/1e9:.1f}B)",
                 key="sec_selected_idx",
             )
-            if st.sidebar.button("Load SEC data", key="sec_load_btn", type="primary", use_container_width=True):
-                st.session_state.sec_data = sec_lookup.get_firm_data(
-                    _matches[_sel_idx].crd, _adv_df
+            _allowed, _remaining, _wait_sec = _sec_lookup_quota()
+            if not _allowed:
+                st.sidebar.error(
+                    f"Lookup rate limit reached. Try again in ~{_wait_sec // 60}m."
                 )
-                st.session_state.pending_reconcile = True
-                st.rerun()
+            else:
+                if st.sidebar.button("Load SEC data", key="sec_load_btn", type="primary", use_container_width=True):
+                    _record_sec_lookup()
+                    st.session_state.sec_data = sec_lookup.get_firm_data(
+                        _matches[_sel_idx].crd, _adv_df
+                    )
+                    st.session_state.pending_reconcile = True
+                    st.rerun()
+                st.sidebar.caption(
+                    f"{_remaining} of {SEC_LOOKUP_LIMIT} lookups remaining this session."
+                )
         else:
             st.sidebar.caption("No matches.")
+
+st.sidebar.caption(
+    "_Data from public SEC Form ADV filings. Per-session use only — bulk "
+    "download or automated harvesting is not permitted. Source: "
+    "[SEC bulk ADV data](https://www.sec.gov/data-research/sec-markets-data/"
+    "information-about-registered-investment-advisers-exempt-reporting-advisers)._"
+)
 
 # Show a small banner with the loaded firm + clear button
 if st.session_state.sec_data is not None:

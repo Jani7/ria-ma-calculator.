@@ -314,6 +314,51 @@ _LIGHT_CSS = """
         white-space: normal;
         word-wrap: break-word;
     }
+    /* Buttons — Streamlit's default light theme leaves them with dark
+       backgrounds and dark text on a white page. Override explicitly. */
+    .stButton > button,
+    div[data-testid="stSidebar"] .stButton > button {
+        background-color: #ffffff;
+        color: #1a202c;
+        border: 1px solid #cbd5e0;
+    }
+    .stButton > button:hover,
+    div[data-testid="stSidebar"] .stButton > button:hover {
+        background-color: #f7fafc;
+        border-color: #2b6cb0;
+        color: #2b6cb0;
+    }
+    .stButton > button[kind="primary"],
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"] {
+        background-color: #2b6cb0;
+        color: #ffffff;
+        border: 1px solid #2b6cb0;
+    }
+    .stButton > button[kind="primary"]:hover,
+    div[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+        background-color: #2c5282;
+        color: #ffffff;
+        border-color: #2c5282;
+    }
+    /* Inputs and dropdowns — keep them readable on white. */
+    .stTextInput input,
+    .stNumberInput input,
+    div[data-testid="stSidebar"] .stTextInput input,
+    div[data-testid="stSidebar"] .stNumberInput input {
+        background-color: #ffffff;
+        color: #1a202c;
+        border-color: #cbd5e0;
+    }
+    div[data-baseweb="select"] > div {
+        background-color: #ffffff;
+        color: #1a202c;
+        border-color: #cbd5e0;
+    }
+    /* Streamlit's info / warning callouts — light-themed background. */
+    div[data-testid="stAlert"] {
+        background-color: #ebf8ff;
+        color: #1a202c;
+    }
     /* Site footer (light) */
     .site-footer {
         border-top: 1px solid #cbd5e0;
@@ -1112,7 +1157,22 @@ elif _query_clean:
                 format_func=lambda i: f"{_fmt_aum_short(_matches[i].aum)} — {_matches[i].firm_name}",
                 key=f"sec_selected_idx_{hash(_query_clean)}",
             )
+            _selected_crd = _matches[_sel_idx].crd
             _allowed, _remaining, _wait_sec = _sec_lookup_quota()
+            # Auto-trigger reconciliation when the selectbox lands on a CRD
+            # we haven't loaded yet. Removes the "Load SEC data" intermediate
+            # click — typing a firm name and picking from the dropdown is
+            # enough. `last_loaded_crd` is updated after Apply OR Cancel so
+            # the dialog doesn't re-open until the user picks a different
+            # firm.
+            if _allowed and _selected_crd != st.session_state.get("last_loaded_crd"):
+                _record_sec_lookup()
+                st.session_state.sec_data = sec_lookup.get_firm_data(
+                    _selected_crd, _adv_df
+                )
+                st.session_state.pending_reconcile = True
+                st.session_state.last_loaded_crd = _selected_crd
+                st.rerun()
             if not _allowed:
                 _wait_label = (
                     f"~{_wait_sec // 60}m" if _wait_sec >= 60
@@ -1123,13 +1183,6 @@ elif _query_clean:
                     f"{SEC_LOOKUP_WINDOW_SEC // 60} min (resets in {_wait_label})."
                 )
             else:
-                if st.sidebar.button("Load SEC data", key="sec_load_btn", type="primary", use_container_width=True):
-                    _record_sec_lookup()
-                    st.session_state.sec_data = sec_lookup.get_firm_data(
-                        _matches[_sel_idx].crd, _adv_df
-                    )
-                    st.session_state.pending_reconcile = True
-                    st.rerun()
                 # Merged attribution + quota line — one caption is calmer
                 # than two stacked ones and conserves sidebar real estate.
                 st.sidebar.caption(

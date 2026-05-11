@@ -754,31 +754,51 @@ st.sidebar.markdown("---")
 # Flush any queued SEC-driven value updates BEFORE the widgets render.
 _apply_pending()
 
-# -- Lookup RIA (SEC Form ADV) -------------------------------------------------
-st.sidebar.markdown("### Lookup RIA")
+# -- Auto-fill from SEC (Form ADV) ---------------------------------------------
+st.sidebar.markdown("### Auto-fill from SEC")
+
+
+def _fmt_aum_short(aum: float) -> str:
+    """$X.XB for ≥$1B, $XXXM otherwise — avoids '$0.0B' rounding loss."""
+    if aum >= 1e9:
+        return f"${aum/1e9:.1f}B"
+    return f"${aum/1e6:.0f}M"
+
+
 search_query = st.sidebar.text_input(
     "Search by firm name",
     key="sec_search",
     placeholder="e.g., Edelman Financial",
     help="Searches the SEC's bulk Form ADV dataset (~16K SEC-registered RIAs).",
 )
-if search_query and len(search_query.strip()) >= 3:
+_query_clean = (search_query or "").strip()
+if _query_clean and len(_query_clean) < 3:
+    st.sidebar.caption("Type 3+ characters to search.")
+elif _query_clean:
     _adv_df = _load_adv_df()
     if _adv_df.empty:
-        st.sidebar.caption("⚠ SEC data file not found. Run `scripts/build_adv_data.py`.")
+        st.sidebar.caption(
+            "⚠ SEC data file not available. "
+            "(Production: check `ADV_DATA_TOKEN` secret. Dev: run `scripts/build_adv_data.py`.)"
+        )
     else:
-        _matches = sec_lookup.search_firms(search_query, _adv_df, limit=5)
+        _matches = sec_lookup.search_firms(_query_clean, _adv_df, limit=5)
         if _matches:
             _sel_idx = st.sidebar.selectbox(
                 "Matching firms",
                 options=list(range(len(_matches))),
-                format_func=lambda i: f"{_matches[i].firm_name} (AUM ${_matches[i].aum/1e9:.1f}B)",
+                format_func=lambda i: f"{_fmt_aum_short(_matches[i].aum)} — {_matches[i].firm_name}",
                 key="sec_selected_idx",
             )
             _allowed, _remaining, _wait_sec = _sec_lookup_quota()
             if not _allowed:
+                _wait_label = (
+                    f"~{_wait_sec // 60}m" if _wait_sec >= 60
+                    else f"~{max(_wait_sec, 1)}s"
+                )
                 st.sidebar.error(
-                    f"Lookup rate limit reached. Try again in ~{_wait_sec // 60}m."
+                    f"Limit: {SEC_LOOKUP_LIMIT} lookups per "
+                    f"{SEC_LOOKUP_WINDOW_SEC // 60} min (resets in {_wait_label})."
                 )
             else:
                 if st.sidebar.button("Load SEC data", key="sec_load_btn", type="primary", use_container_width=True):
@@ -795,18 +815,16 @@ if search_query and len(search_query.strip()) >= 3:
             st.sidebar.caption("No matches.")
 
 st.sidebar.caption(
-    "_Data from public SEC Form ADV filings. Per-session use only — bulk "
-    "download or automated harvesting is not permitted. Source: "
-    "[SEC bulk ADV data](https://www.sec.gov/data-research/sec-markets-data/"
-    "information-about-registered-investment-advisers-exempt-reporting-advisers)._"
+    "_Source: [SEC Form ADV](https://www.sec.gov/data-research/sec-markets-data/"
+    "information-about-registered-investment-advisers-exempt-reporting-advisers) (public)._"
 )
 
-# Show a small banner with the loaded firm + clear button
+# Loaded-firm banner + clear button. Sits at the bottom of the lookup block so
+# it's anchored to the lookup widget, not Target Firm.
 if st.session_state.sec_data is not None:
     _sec = st.session_state.sec_data
-    st.sidebar.caption(
-        f"📄 SEC: **{_sec.firm_name}** — as of {_sec.as_of_date or 'n/a'}"
-    )
+    _as_of = f" — as of {_sec.as_of_date}" if _sec.as_of_date else ""
+    st.sidebar.caption(f"📄 SEC: **{_sec.firm_name}**{_as_of}")
     if st.sidebar.button("Clear SEC data", key="sec_clear_btn"):
         st.session_state.sec_data = None
         st.session_state.pending_reconcile = False
@@ -848,7 +866,9 @@ annual_revenue = currency_input("Annual Revenue ($)", 4_000_000, "revenue")
 if _sec is not None:
     _sec_field_badge(
         "revenue", int(_sec.estimated_revenue),
-        lambda v: f"${v:,.0f} (est: AUM × 0.75%)", "Revenue",
+        # Revenue isn't in ADV — this is AUM × 0.75% as a rough proxy. Loud
+        # disclaimer so it never lands in an IC memo as "filed revenue."
+        lambda v: f"${v:,.0f} · est only (AUM × 0.75%, not filed)", "Revenue",
     )
 
 ebitda = currency_input("EBITDA ($)", 1_600_000, "ebitda")
@@ -866,17 +886,25 @@ if _sec is not None and _sec.num_clients and _sec.num_clients > 0:
 
 if "rev_growth_pct" not in st.session_state:
     st.session_state["rev_growth_pct"] = 5.0
+# Slider tops out at 30%; anything beyond is so anomalous that the user
+# should manually enter rather than have the AUM-proxy auto-fill it.
+_GROWTH_SLIDER_MAX = 30.0
 rev_growth_pct = st.sidebar.slider(
-    "Revenue Growth Rate (%)", 0.0, 15.0, step=0.5, key="rev_growth_pct"
+    "Revenue Growth Rate (%)", 0.0, _GROWTH_SLIDER_MAX, step=0.5, key="rev_growth_pct",
+    help="The pro forma applies this to revenue. SEC auto-fill uses YoY AUM "
+         "change as a proxy — it's directionally right but isn't filed revenue growth.",
 )
 rev_growth = rev_growth_pct / 100
 if _sec is not None and _sec.growth_rate is not None:
-    _sec_field_badge(
-        "rev_growth_pct",
-        round(max(0.0, min(15.0, _sec.growth_rate * 100)), 1),
-        lambda v: f"{v:.1f}% YoY",
-        "Growth",
-    )
+    _raw_pct = _sec.growth_rate * 100
+    _capped_pct = round(max(0.0, min(_GROWTH_SLIDER_MAX, _raw_pct)), 1)
+    if _raw_pct > _GROWTH_SLIDER_MAX:
+        _badge_fmt = lambda v, raw=_raw_pct: f"{raw:.1f}% YoY AUM (slider caps at {_GROWTH_SLIDER_MAX:.0f}%)"
+    elif _raw_pct < 0:
+        _badge_fmt = lambda v, raw=_raw_pct: f"{raw:.1f}% YoY AUM (negative — slider clamps to 0)"
+    else:
+        _badge_fmt = lambda v: f"{v:.1f}% YoY AUM (proxy)"
+    _sec_field_badge("rev_growth_pct", _capped_pct, _badge_fmt, "Growth")
 
 pct_recurring = st.sidebar.slider("% Recurring Revenue", 50, 100, 90, 5)
 attrition_rate = st.sidebar.slider("Client Attrition Rate (%)", 0.0, 20.0, 5.0, 0.5) / 100
@@ -890,8 +918,11 @@ def _render_reconcile_dialog():
 
     @st.dialog(f"Apply SEC data: {sec.firm_name}")
     def _dlg():
-        st.caption(f"Filing as of {sec.as_of_date or 'unknown'}. "
-                   f"Pick which value to use for each field.")
+        st.caption(
+            f"Filing as of {sec.as_of_date or 'unknown'}. "
+            f"Each field defaults to **Keep mine** — flip to SEC only for fields "
+            f"you want overwritten."
+        )
 
         decisions: dict[str, tuple[str, object]] = {}
 
@@ -899,8 +930,8 @@ def _render_reconcile_dialog():
             st.markdown(f"**{label}**")
             choice = st.radio(
                 label,
-                options=[f"SEC: {sec_display}", f"Keep mine: {current_display}"],
-                index=0,
+                options=[f"Keep mine: {current_display}", f"SEC: {sec_display}"],
+                index=0,  # default to "Keep mine" — never silently overwrite user inputs
                 horizontal=True,
                 key=f"reconcile_radio_{key}",
                 label_visibility="collapsed",
@@ -922,27 +953,38 @@ def _render_reconcile_dialog():
                                  .replace(',', '').replace('$', '').strip()))
         except (ValueError, TypeError):
             cur_rev = 4_000_000
-        _row("revenue", "Annual Revenue (est: AUM × 0.75%)",
+        _row("revenue", "Annual Revenue · *estimate only* (AUM × 0.75%, not filed)",
              f"${cur_rev:,}", est_rev, f"${est_rev:,}")
 
         if sec.growth_rate is not None:
-            growth_pct = round(max(0.0, min(15.0, sec.growth_rate * 100)), 1)
+            raw_pct = sec.growth_rate * 100
+            growth_pct = round(max(0.0, min(_GROWTH_SLIDER_MAX, raw_pct)), 1)
             cur_growth = float(st.session_state.get("rev_growth_pct", 5.0))
-            _row("rev_growth_pct", "Revenue Growth Rate",
-                 f"{cur_growth:.1f}%", growth_pct, f"{growth_pct:.1f}% (YoY AUM)")
+            if raw_pct > _GROWTH_SLIDER_MAX:
+                sec_disp = f"{raw_pct:.1f}% YoY AUM (slider caps at {_GROWTH_SLIDER_MAX:.0f}%)"
+            elif raw_pct < 0:
+                sec_disp = f"{raw_pct:.1f}% YoY AUM (negative — applied as 0%)"
+            else:
+                sec_disp = f"{growth_pct:.1f}% (YoY AUM proxy)"
+            _row("rev_growth_pct", "Revenue Growth · *AUM proxy* (not filed revenue growth)",
+                 f"{cur_growth:.1f}%", growth_pct, sec_disp)
 
         st.markdown("---")
         c1, c2 = st.columns(2)
         if c1.button("Apply selected", type="primary", use_container_width=True):
+            applied = 0
             for key, (choice, sec_value) in decisions.items():
                 if choice.startswith("SEC:"):
                     if key in ("aum", "revenue"):
                         _queue_apply(key, f"{int(sec_value):,}")
                     else:
                         _queue_apply(key, sec_value)
+                    applied += 1
             st.session_state.pending_reconcile = False
+            if applied:
+                st.toast(f"Applied {applied} SEC value{'s' if applied != 1 else ''}.", icon="✅")
             st.rerun()
-        if c2.button("Skip", use_container_width=True):
+        if c2.button("Cancel", use_container_width=True):
             st.session_state.pending_reconcile = False
             st.rerun()
 

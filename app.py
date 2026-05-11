@@ -50,10 +50,27 @@ def _resolve_adv() -> dict:
     The status code is intentionally minimal (e.g. "http_403") — no token,
     URL, or exception text is ever stored, so this dict is safe to log.
     """
-    if _ADV_LOCAL_PATH.exists():
+    def _is_valid_parquet(p: Path) -> bool:
+        """A parquet file starts and ends with the 4-byte 'PAR1' magic."""
+        try:
+            with open(p, "rb") as f:
+                head = f.read(4)
+                f.seek(-4, 2)
+                tail = f.read(4)
+            return head == b"PAR1" and tail == b"PAR1"
+        except OSError:
+            return False
+
+    if _ADV_LOCAL_PATH.exists() and _is_valid_parquet(_ADV_LOCAL_PATH):
         return {"path": _ADV_LOCAL_PATH, "status": "local"}
     if _ADV_CACHE_PATH.exists():
-        return {"path": _ADV_CACHE_PATH, "status": "cache"}
+        if _is_valid_parquet(_ADV_CACHE_PATH):
+            return {"path": _ADV_CACHE_PATH, "status": "cache"}
+        # Stale/bad bytes from a prior failed fetch — discard and re-fetch.
+        try:
+            _ADV_CACHE_PATH.unlink()
+        except OSError:
+            pass
 
     token = None
     repo = "Jani7/ria-ma-data"

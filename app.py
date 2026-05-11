@@ -1470,7 +1470,7 @@ if "rev_growth_pct" not in st.session_state:
 # should manually enter rather than have the AUM-proxy auto-fill it.
 _GROWTH_SLIDER_MAX = 30.0
 rev_growth_pct = st.sidebar.slider(
-    "Revenue Growth Rate (%)", 0.0, _GROWTH_SLIDER_MAX, step=0.5, key="rev_growth_pct",
+    "Revenue Growth Rate (%)", -10.0, _GROWTH_SLIDER_MAX, step=0.5, key="rev_growth_pct",
     help="The pro forma applies this to revenue. SEC auto-fill uses YoY AUM "
          "change as a proxy — it's directionally right but isn't filed revenue growth.",
 )
@@ -1779,6 +1779,7 @@ pro_forma = build_pro_forma(
 
 returns = compute_irr_and_returns(
     pro_forma, purchase_price, pct_upfront_cash, pct_self_funded, pct_equity_rollover,
+    pct_recurring=pct_recurring,
 )
 
 dscr = compute_dscr(pro_forma)
@@ -1934,18 +1935,36 @@ with tab1:
     st.markdown('<div class="section-header">Key Return Metrics</div>', unsafe_allow_html=True)
     k1, k2, k3, k4 = st.columns(4)
 
-    irr5 = returns.get("irr_yr5", 0)
-    irr_class = "positive" if irr5 > 0.15 else ("neutral" if irr5 > 0 else "negative")
+    # IRR / CoC come back as None when the buyer has no equity at risk
+    # (100% leverage or 0% upfront) — show 'n/a' so a junior analyst can't
+    # screenshot a misleading thousands-of-percent figure.
+    irr5 = returns.get("irr_yr5")
+    if irr5 is None:
+        irr_display, irr_class = "n/a", "neutral"
+    else:
+        irr_display = fmt_pct(irr5)
+        irr_class = "positive" if irr5 > 0.15 else ("neutral" if irr5 > 0 else "negative")
     with k1:
-        st.markdown(metric_card("5-Year IRR", fmt_pct(irr5), irr_class), unsafe_allow_html=True)
+        st.markdown(metric_card("5-Year IRR", irr_display, irr_class), unsafe_allow_html=True)
     with k2:
-        coc5 = returns.get("coc_yr5", 0)
-        st.markdown(metric_card("5-Yr Cash/Cash", f"{coc5:.2f}x", "positive" if coc5 > 1 else "negative"), unsafe_allow_html=True)
+        coc5 = returns.get("coc_yr5")
+        if coc5 is None:
+            coc_display, coc_class = "n/a", "neutral"
+        else:
+            coc_display, coc_class = f"{coc5:.2f}x", "positive" if coc5 > 1 else "negative"
+        st.markdown(metric_card("5-Yr Cash/Cash", coc_display, coc_class), unsafe_allow_html=True)
     with k3:
         st.markdown(metric_card("Breakeven Year", str(returns["breakeven_year"]), "neutral"), unsafe_allow_html=True)
     with k4:
-        yr1_dscr = dscr.iloc[0] if len(dscr) > 0 else 0
-        st.markdown(metric_card("Year 1 DSCR", f"{yr1_dscr:.2f}x", "positive" if yr1_dscr > 1.25 else "negative"), unsafe_allow_html=True)
+        # DSCR is NaN in years with no debt — show 'n/a' instead of 0.00x
+        # which a credit reviewer reads as a covenant breach.
+        yr1_dscr = dscr.iloc[0] if len(dscr) > 0 else float("nan")
+        import math as _m
+        if _m.isnan(yr1_dscr):
+            dscr_display, dscr_class = "n/a", "neutral"
+        else:
+            dscr_display, dscr_class = f"{yr1_dscr:.2f}x", "positive" if yr1_dscr > 1.25 else "negative"
+        st.markdown(metric_card("Year 1 DSCR", dscr_display, dscr_class), unsafe_allow_html=True)
 
     # Transition comp summary if applicable
     if consulting_annual > 0 or noncompete_total > 0:

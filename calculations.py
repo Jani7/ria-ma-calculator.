@@ -8,11 +8,26 @@ import pandas as pd
 
 
 MARKET_REPLACEMENT_COST = 200_000  # Default market replacement cost for owner
+# Steady-state attrition decays to this fraction of the year-1 rate after the
+# transition period. A $500M+ RIA with disciplined client outreach typically
+# runs ~2-3% steady-state attrition vs. 5-15% during the buyer transition.
+STEADY_STATE_ATTRITION_FRACTION = 0.4
 
 
 def compute_eboc(ebitda: float, owner_comp: float, replacement_cost: float = MARKET_REPLACEMENT_COST) -> float:
     """EBOC = EBITDA + (Owner's Comp - Market Replacement Cost)."""
     return ebitda + (owner_comp - replacement_cost)
+
+
+def _exit_multiple_from_recurring(pct_recurring: float) -> float:
+    """Map the % Recurring Revenue input (50-100) to a terminal-value EBITDA
+    multiple. RIA M&A precedent: higher fee-based recurring revenue earns a
+    higher exit multiple. 50% recurring → ~4.0×; 100% → ~6.0×."""
+    if pct_recurring is None:
+        return 6.0
+    # Clamp to the slider range, then linearly interpolate 4× → 6×.
+    p = max(50.0, min(100.0, float(pct_recurring)))
+    return 4.0 + 2.0 * (p - 50.0) / 50.0
 
 
 def implied_multiples(purchase_price: float, revenue: float, aum: float, eboc: float) -> dict:
@@ -61,11 +76,19 @@ def build_pro_forma(
     noncompete_years: int = 0,
     # Tax
     tax_rate: float = 0,
+    # Earnout expectation for buyer cash-flow purposes. 1.0 = full earnout
+    # paid (target met), 0.0 = nothing paid. This is the base-case figure
+    # used for IRR; the Earnout tab models full upside/downside scenarios.
+    earnout_achievement: float = 1.0,
+    # Market-rate replacement comp for the departing owner. Defaults to the
+    # tool's $200K constant but should be overridden for senior CIO seats
+    # at $500M+ AUM firms (typically $400-700K).
+    replacement_cost: float = MARKET_REPLACEMENT_COST,
 ) -> pd.DataFrame:
     """Build a year-by-year pro forma P&L for years 1-N."""
     rows = []
     # Expense base = Revenue - EBITDA, then replace owner comp with market rate
-    base_expenses = revenue - ebitda - owner_comp + MARKET_REPLACEMENT_COST
+    base_expenses = revenue - ebitda - owner_comp + replacement_cost
     additional_staff_cost = additional_staff * staff_cost_per_head
 
     # --- Debt service schedule (year-by-year) ---
@@ -87,12 +110,27 @@ def build_pro_forma(
     # --- Transition comp schedule ---
     annual_noncompete = noncompete_total / noncompete_years if noncompete_years > 0 else 0
 
+    # --- Earnout payment schedule (buyer outflow) ---
+    # Previously earnout dollars were tracked only as seller proceeds; they
+    # never entered net_cash_flow. That made every IRR for an earnout-heavy
+    # deal materially overstated. We now subtract the base-case earnout
+    # payment from buyer cash flow over the earnout period.
+    total_earnout = purchase_price * pct_earnout * earnout_achievement
+    annual_earnout_payment = (
+        total_earnout / earnout_period if earnout_period > 0 else 0
+    )
+
     for yr in range(1, years + 1):
-        # Revenue with growth and attrition
+        # Revenue with growth and attrition. Attrition was previously clamped
+        # to years 1-2 only, which assumed 100% retention from Y3 onward — a
+        # red-team-flagged inflation of pro forma revenue. We now decay
+        # attrition to a steady-state fraction of the year-1 rate, modeling
+        # real ongoing client churn rather than zeroing it out.
         if yr <= 2:
-            effective_rate = growth_rate - attrition_rate
+            yr_attrition = attrition_rate
         else:
-            effective_rate = growth_rate
+            yr_attrition = attrition_rate * STEADY_STATE_ATTRITION_FRACTION
+        effective_rate = growth_rate - yr_attrition
 
         if yr == 1:
             yr_revenue = revenue * (1 + effective_rate)
@@ -132,7 +170,10 @@ def build_pro_forma(
 
         total_debt_service = yr_debt + yr_debt_balloon + yr_note
 
-        yr_pretax_cf = yr_ebitda - total_debt_service
+        # Earnout payment in this year (buyer outflow)
+        yr_earnout_payment = annual_earnout_payment if yr <= earnout_period else 0
+
+        yr_pretax_cf = yr_ebitda - total_debt_service - yr_earnout_payment
 
         # Tax benefit from interest deduction
         yr_tax_benefit = 0
@@ -153,6 +194,7 @@ def build_pro_forma(
             "ebitda": yr_ebitda,
             "debt_service": yr_debt + yr_debt_balloon,
             "seller_note_payment": yr_note,
+            "earnout_payment": yr_earnout_payment,
             "tax_benefit": yr_tax_benefit,
             "pretax_cash_flow": yr_pretax_cf,
             "net_cash_flow": yr_net_cf,
@@ -167,22 +209,44 @@ def compute_irr_and_returns(
     pct_upfront: float,
     pct_self_funded: float,
     pct_equity_rollover: float,
+    pct_recurring: float = 100.0,
 ) -> dict:
-    """Compute IRR and cash-on-cash returns at years 3, 5, 7."""
+    """Compute IRR and cash-on-cash returns at years 3, 5, 7.
+
+    Returns None for IRR/CoC fields when the buyer's invested cash is zero
+    or negative (100% leverage, 0% upfront, etc.) so the UI can show 'n/a'
+    rather than a meaningless thousands-of-percent figure that came out of
+    dividing by a placeholder $1.
+
+    `pct_recurring` (50-100) controls the exit-multiple assumption: 50% →
+    4× EBITDA, 100% → 6× EBITDA. Reflects RIA M&A precedent that fee-based
+    recurring revenue earns a higher exit multiple than transactional.
+    """
     total_cash_invested = purchase_price * pct_upfront * pct_self_funded
+    exit_multiple = _exit_multiple_from_recurring(pct_recurring)
+
+    results: dict = {
+        "total_cash_invested": total_cash_invested,
+        "exit_multiple": exit_multiple,
+    }
+
     if total_cash_invested <= 0:
-        total_cash_invested = 1  # avoid division by zero
+        # No buyer equity at risk — IRR / CoC / breakeven are undefined.
+        # We return None so the UI can render 'n/a' explicitly.
+        for horizon in [3, 5, 7]:
+            results[f"irr_yr{horizon}"] = None
+            results[f"coc_yr{horizon}"] = None
+        results["breakeven_year"] = "n/a — no equity invested"
+        return results
 
     # Cash flows for IRR: initial outlay + annual net cash flows
     cf = [-total_cash_invested] + pro_forma["net_cash_flow"].tolist()
 
-    # IRR for different horizons
-    results = {}
     for horizon in [3, 5, 7]:
         subset = cf[: horizon + 1]
-        # Add terminal value at exit (rough: last year EBITDA * 6x multiple)
+        # Add terminal value at exit (last year EBITDA × recurring-adjusted multiple)
         if horizon <= len(pro_forma):
-            terminal = pro_forma.iloc[min(horizon - 1, len(pro_forma) - 1)]["ebitda"] * 6
+            terminal = pro_forma.iloc[min(horizon - 1, len(pro_forma) - 1)]["ebitda"] * exit_multiple
             subset_with_tv = subset.copy()
             subset_with_tv[-1] += terminal
         else:
@@ -194,8 +258,6 @@ def compute_irr_and_returns(
 
         results[f"irr_yr{horizon}"] = irr
         results[f"coc_yr{horizon}"] = coc
-
-    results["total_cash_invested"] = total_cash_invested
 
     # Breakeven analysis
     cumulative = 0
@@ -340,10 +402,15 @@ def build_seller_note_amortization(
 
 
 def compute_dscr(pro_forma: pd.DataFrame) -> pd.Series:
-    """Debt Service Coverage Ratio = EBITDA / (Debt Service + Seller Note Payment)."""
+    """Debt Service Coverage Ratio = EBITDA / (Debt Service + Seller Note Payment).
+
+    Returns NaN — not 0.0 — for years with zero debt service. A credit
+    reviewer reads 0.00× as a covenant breach; leaving the value NaN lets
+    the UI render it as 'n/a' instead, which is the correct semantics for
+    'this period has no debt to cover.'
+    """
     total_debt = pro_forma["debt_service"] + pro_forma["seller_note_payment"]
-    dscr = pro_forma["ebitda"] / total_debt.replace(0, np.nan)
-    return dscr.fillna(0)
+    return pro_forma["ebitda"] / total_debt.replace(0, np.nan)
 
 
 def compute_earnout_scenarios(
@@ -505,11 +572,14 @@ def sensitivity_irr(
                 params["pct_upfront"],
                 params["pct_self_funded"],
                 params.get("pct_equity_rollover", 0),
+                params.get("pct_recurring", 100),
             )
+            # IRR is None for degenerate inputs (no equity). Map to NaN so
+            # the heatmap masks the cell rather than charting a misleading 0.
             results.append({
                 "multiple": mult,
                 "attrition_rate": att,
-                "irr_yr5": returns["irr_yr5"],
+                "irr_yr5": returns["irr_yr5"] if returns["irr_yr5"] is not None else np.nan,
             })
 
     df = pd.DataFrame(results)
@@ -536,6 +606,7 @@ def sensitivity_breakeven(
                 params["pct_upfront"],
                 params["pct_self_funded"],
                 params.get("pct_equity_rollover", 0),
+                params.get("pct_recurring", 100),
             )
             be = returns["breakeven_year"]
             results.append({
@@ -561,6 +632,7 @@ _PRO_FORMA_PARAMS = {
     "consulting_annual", "consulting_years",
     "noncompete_total", "noncompete_years",
     "tax_rate",
+    "earnout_achievement", "replacement_cost",
 }
 
 

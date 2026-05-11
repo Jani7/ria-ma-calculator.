@@ -1997,9 +1997,10 @@ st.caption(
     "Revenue estimated at 0.75% of AUM — actual figures vary by fee structure."
 )
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab7, tab6 = st.tabs([
     "Deal Summary", "Pro Forma Financials", "Sensitivity Analysis",
-    "Earnout & Seller Economics", "Debt Analysis", "Instructions",
+    "Earnout & Seller Economics", "Debt Analysis",
+    "Integration Strategy", "Instructions",
 ])
 
 # ==============================================================================

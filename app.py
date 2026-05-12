@@ -1272,16 +1272,19 @@ def render_instructions_tab():
 
 
 def currency_input(label, default, key, help_text=None):
-    """Text input that displays and accepts comma-formatted dollar amounts."""
+    """Text input that displays and accepts comma-formatted dollar amounts.
+    Reformats the field in place after the user submits (Enter/blur) so
+    "1000" becomes "1,000" without leaving a stale caption hint behind."""
     if key not in st.session_state:
         st.session_state[key] = f"{default:,.0f}"
     raw = st.sidebar.text_input(label, key=key, help=help_text)
     try:
         cleaned = raw.replace(",", "").replace("$", "").replace(" ", "").strip()
         val = int(float(cleaned))
-        # Show formatted feedback if user typed raw digits
-        if raw != f"{val:,.0f}" and raw == cleaned:
-            st.sidebar.caption(f"= ${val:,.0f}")
+        formatted = f"{val:,.0f}"
+        if raw != formatted:
+            _queue_apply(key, formatted)
+            st.rerun()
         return val
     except (ValueError, TypeError):
         st.sidebar.error(f"Invalid number: {raw}")
@@ -1290,16 +1293,18 @@ def currency_input(label, default, key, help_text=None):
 
 def count_input(label, default, key, help_text=None):
     """Like currency_input but for plain integer counts (no $ prefix).
-    Used for client counts and similar so the displayed value gets
-    comma-separated like the dollar fields ('322,130' not '322130')."""
+    Reformats the field in place after submit so client counts render
+    "1,000" not "1000"."""
     if key not in st.session_state:
         st.session_state[key] = f"{default:,}"
     raw = st.sidebar.text_input(label, key=key, help=help_text)
     try:
         cleaned = raw.replace(",", "").replace(" ", "").strip()
         val = int(float(cleaned))
-        if raw != f"{val:,}" and raw == cleaned:
-            st.sidebar.caption(f"= {val:,}")
+        formatted = f"{val:,}"
+        if raw != formatted:
+            _queue_apply(key, formatted)
+            st.rerun()
         return val
     except (ValueError, TypeError):
         st.sidebar.error(f"Invalid number: {raw}")
@@ -1632,7 +1637,7 @@ def _render_reconcile_dialog():
                                      .replace(',', '').replace('$', '').strip()))
             except (ValueError, TypeError):
                 cur_rev = 4_000_000
-            _row("revenue", "Annual Revenue · *estimate only* (AUM × 0.75%, not filed)",
+            _row("revenue", "Annual Revenue · estimate only (AUM × 0.75%, not filed)",
                  f"${cur_rev:,}", est_rev, f"${est_rev:,}")
 
         if sec.growth_rate is not None:
@@ -1645,7 +1650,7 @@ def _render_reconcile_dialog():
                 sec_disp = f"{raw_pct:.1f}% YoY AUM (negative — applied as 0%)"
             else:
                 sec_disp = f"{growth_pct:.1f}% (YoY AUM proxy)"
-            _row("rev_growth_pct", "Revenue Growth · *AUM proxy* (not filed revenue growth)",
+            _row("rev_growth_pct", "Revenue Growth · AUM proxy (not filed revenue growth)",
                  f"{cur_growth:.1f}%", growth_pct, sec_disp)
 
         st.markdown("---")
@@ -2115,7 +2120,7 @@ with tab1:
     # trigger MathJax italics.
     _rationale_safe = sd['rationale'].replace("$", r"\$")
     st.caption(
-        f"Profile: **{sd['profile'].replace('_', ' ').title()}**. {_rationale_safe} "
+        f"Profile · {sd['profile'].replace('_', ' ').title()}. {_rationale_safe} "
         f"Recommended note rate {sd['note_rate']*100:.1f}% over {sd['note_term']} years, "
         f"{sd['earnout_period']}-year earnout capped at {sd['earnout_cap_pct']}%, "
         f"{sd['standstill_years']}-year note standstill if bank-financed."
@@ -2251,9 +2256,9 @@ with tab1:
             st.dataframe(display, use_container_width=True, hide_index=True)
 
         st.caption(
-            "_Comps reflect publicly disclosed terms; private mid-market deals "
+            "Comps reflect publicly disclosed terms; private mid-market deals "
             "skew unrepresented and may trade 0.5-1.0x lower than headline "
-            f"aggregator transactions. N = {len(comps_df)}._"
+            f"aggregator transactions. N = {len(comps_df)}."
         )
 
     st.markdown('<div class="section-header">Purchase Price & Implied Multiples</div>', unsafe_allow_html=True)
@@ -2788,7 +2793,7 @@ with tab7:
             step=0.05, key="_w_int_capture_multiple",
             help="Severance, tech migration, advisor retention bonuses, "
                  "and dual-running systems during the transition. Industry "
-                 "rule of thumb: $1.00-1.50 of one-time spend per $1.00 of "
+                 "rule of thumb: \\$1.00-1.50 of one-time spend per \\$1.00 of "
                  "annual run-rate synergy. Spread 60/30/10 across years 1-3.",
         )
         st.session_state["int_capture_multiple"] = _cap
@@ -2906,12 +2911,12 @@ with tab7:
     st.markdown("---")
     st.markdown("**Worked example**")
     st.caption(
-        "A $400M-AUM target with $3.2M revenue and $2M of annual expenses, "
-        "acquired by a $1B+ buyer with a full compliance/tech/back-office "
+        "A \\$400M-AUM target with \\$3.2M revenue and \\$2M of annual expenses, "
+        "acquired by a \\$1B+ buyer with a full compliance/tech/back-office "
         "stack: at default settings (14% cost takeout, 7% revenue uplift, "
-        "1.25× capture), expect roughly **$500K/year of run-rate synergy** "
-        "by year 3 (≈15% of target revenue) for a **one-time integration "
-        "spend of ~$630K**. The schedule above adjusts those numbers for "
+        "1.25× capture), expect roughly \\$500K/year of run-rate synergy "
+        "by year 3 (≈15% of target revenue) for a one-time integration "
+        "spend of ~\\$630K. The schedule above adjusts those numbers for "
         "your specific inputs."
     )
 

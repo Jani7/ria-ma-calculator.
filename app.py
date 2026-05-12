@@ -1022,7 +1022,6 @@ def render_welcome_page():
                 <p>Amortization with I/O periods, balloons, and standstill terms</p>
             </div>
         </div>
-
         <div class="how-it-works">
             <div class="eyebrow">How it works &mdash; 60 seconds</div>
             <div class="how-grid">

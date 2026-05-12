@@ -2955,6 +2955,7 @@ if st.button("Export Full Analysis to PDF", type="primary"):
                 noncompete_total=noncompete_total, noncompete_years=noncompete_years,
                 tax_rate=tax_rate,
             ),
+            synergy_schedule=_active_synergy_schedule,
         )
         st.download_button(
             label="Download PDF",

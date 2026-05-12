@@ -62,7 +62,8 @@ def fmt_d(val):
 
 
 def generate_pdf(purchase_price, multiples, eboc, pro_forma, returns,
-                 loan_amort, note_amort, earnout_scenarios, dscr, inputs):
+                 loan_amort, note_amort, earnout_scenarios, dscr, inputs,
+                 synergy_schedule=None):
     pdf = AnalysisPDF()
     pdf.alias_nb_pages()
     pdf.add_page()
@@ -147,6 +148,37 @@ def generate_pdf(purchase_price, multiples, eboc, pro_forma, returns,
                 fmt_d(r["interest"]), fmt_d(r["principal_paid"]), fmt_d(r["end_balance"]),
             ])
         pdf.table(headers, rows)
+
+    # Integration Strategy
+    pdf.add_page()
+    pdf.section_title("Integration Strategy")
+    if synergy_schedule is not None and len(synergy_schedule) > 0:
+        attrs = synergy_schedule.attrs
+        pdf.kv_row("Cost Takeout (Run-Rate):", fmt_d(attrs["runrate_cost_takeout"]))
+        pdf.kv_row("Revenue Uplift (Run-Rate):", fmt_d(attrs["runrate_revenue_uplift"]))
+        pdf.kv_row("Total Run-Rate Synergy:", fmt_d(attrs["runrate_total_synergy"]))
+        pdf.kv_row("Total Capture Cost:", fmt_d(attrs["total_capture_cost"]))
+        pdf.kv_row("Buyer Capability Factor:", f"{attrs['capability_factor']*100:.0f}%")
+        pdf.kv_row("Synergy NPV @ 10%:", fmt_d(attrs["synergy_npv"]))
+        pdf.ln(3)
+        headers = ["Year", "Cost Takeout", "Revenue Uplift", "Capture Cost", "Net Synergy"]
+        rows = []
+        for _, r in synergy_schedule.iterrows():
+            rows.append([
+                str(int(r["year"])), fmt_d(r["cost_takeout"]), fmt_d(r["revenue_uplift"]),
+                fmt_d(r["capture_cost"]), fmt_d(r["net_synergy"]),
+            ])
+        pdf.table(headers, rows)
+    else:
+        pdf.kv_row("Y1 Integration Cost:", fmt_d(inputs["integration_costs"]))
+        pdf.kv_row(
+            "Consulting (annual x years):",
+            f"{fmt_d(inputs['consulting_annual'])} x {inputs['consulting_years']} yr",
+        )
+        pdf.kv_row(
+            "Non-compete (total / years):",
+            f"{fmt_d(inputs['noncompete_total'])} over {inputs['noncompete_years']} yr",
+        )
 
     # Output
     buf = io.BytesIO()

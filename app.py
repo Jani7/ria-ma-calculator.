@@ -1294,13 +1294,18 @@ def render_instructions_tab():
     """, unsafe_allow_html=True)
 
 
-def currency_input(label, default, key, help_text=None):
+def currency_input(label, default, key, help_text=None, _container=None):
     """Text input that displays and accepts comma-formatted dollar amounts.
     Reformats the field in place after the user submits (Enter/blur) so
-    "1000" becomes "1,000" without leaving a stale caption hint behind."""
+    "1000" becomes "1,000" without leaving a stale caption hint behind.
+
+    Pass `_container` (e.g. an `st.sidebar.expander(...)` return value) to
+    render into a non-default container. Defaults to st.sidebar so existing
+    call sites keep working unchanged."""
+    target = _container if _container is not None else st.sidebar
     if key not in st.session_state:
         st.session_state[key] = f"{default:,.0f}"
-    raw = st.sidebar.text_input(label, key=key, help=help_text)
+    raw = target.text_input(label, key=key, help=help_text)
     try:
         cleaned = raw.replace(",", "").replace("$", "").replace(" ", "").strip()
         val = int(float(cleaned))
@@ -1310,17 +1315,18 @@ def currency_input(label, default, key, help_text=None):
             st.rerun()
         return val
     except (ValueError, TypeError):
-        st.sidebar.error(f"Invalid number: {raw}")
+        target.error(f"Invalid number: {raw}")
         return default
 
 
-def count_input(label, default, key, help_text=None):
+def count_input(label, default, key, help_text=None, _container=None):
     """Like currency_input but for plain integer counts (no $ prefix).
     Reformats the field in place after submit so client counts render
-    "1,000" not "1000"."""
+    "1,000" not "1000". See currency_input for the _container arg."""
+    target = _container if _container is not None else st.sidebar
     if key not in st.session_state:
         st.session_state[key] = f"{default:,}"
-    raw = st.sidebar.text_input(label, key=key, help=help_text)
+    raw = target.text_input(label, key=key, help=help_text)
     try:
         cleaned = raw.replace(",", "").replace(" ", "").strip()
         val = int(float(cleaned))
@@ -1330,7 +1336,7 @@ def count_input(label, default, key, help_text=None):
             st.rerun()
         return val
     except (ValueError, TypeError):
-        st.sidebar.error(f"Invalid number: {raw}")
+        target.error(f"Invalid number: {raw}")
         return default
 
 
@@ -1725,84 +1731,85 @@ def _render_reconcile_dialog():
 if st.session_state.pending_reconcile and st.session_state.sec_data is not None:
     _render_reconcile_dialog()
 
-st.sidebar.markdown("---")
+# -- Deal Structure expander (Deal Terms + Seller Note + Earnout) --------------
+# Tuning inputs collapse behind expanders so the sidebar reads light on first
+# paint. Exec audiences can dig in only when they want to.
+_exp_deal = st.sidebar.expander("Deal Structure", expanded=False)
+with _exp_deal:
+    st.markdown("### Deal Terms")
+    price_method = st.radio("Purchase Price Method", ["Enter Price", "Select Multiple"])
+    if price_method == "Enter Price":
+        purchase_price = currency_input("Purchase Price ($)", 8_000_000, "purchase_price", _container=_exp_deal)
+    else:
+        rev_multiple = st.slider("Revenue Multiple", 1.0, 5.0, 2.0, 0.1)
+        purchase_price = int(annual_revenue * rev_multiple)
+        st.info(f"Implied Price: {fmt_dollar(purchase_price)}")
 
-# -- Deal Terms ----------------------------------------------------------------
-st.sidebar.markdown("### Deal Terms")
-price_method = st.sidebar.radio("Purchase Price Method", ["Enter Price", "Select Multiple"])
-if price_method == "Enter Price":
-    purchase_price = currency_input("Purchase Price ($)", 8_000_000, "purchase_price")
-else:
-    rev_multiple = st.sidebar.slider("Revenue Multiple", 1.0, 5.0, 2.0, 0.1)
-    purchase_price = int(annual_revenue * rev_multiple)
-    st.sidebar.info(f"Implied Price: {fmt_dollar(purchase_price)}")
+    # Explicit keys so the "Apply suggested splits" button on Tab 1 can write
+    # values into these sliders via the _queue_apply / _apply_pending pattern.
+    for _k, _v in (("pct_upfront_cash", 60), ("pct_seller_note", 20),
+                   ("pct_earnout", 15), ("pct_equity_rollover", 5)):
+        if _k not in st.session_state:
+            st.session_state[_k] = _v
+    pct_upfront_cash = st.slider("% Upfront Cash", 0, 100, step=5, key="pct_upfront_cash") / 100
+    pct_seller_note = st.slider("% Seller Note", 0, 100, step=5, key="pct_seller_note") / 100
+    pct_earnout = st.slider("% Earnout", 0, 100, step=5, key="pct_earnout") / 100
+    pct_equity_rollover = st.slider("% Equity Rollover", 0, 100, step=5, key="pct_equity_rollover") / 100
 
-# Explicit keys so the "Apply suggested splits" button on Tab 1 can write
-# values into these sliders via the _queue_apply / _apply_pending pattern.
-for _k, _v in (("pct_upfront_cash", 60), ("pct_seller_note", 20),
-               ("pct_earnout", 15), ("pct_equity_rollover", 5)):
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
-pct_upfront_cash = st.sidebar.slider("% Upfront Cash", 0, 100, step=5, key="pct_upfront_cash") / 100
-pct_seller_note = st.sidebar.slider("% Seller Note", 0, 100, step=5, key="pct_seller_note") / 100
-pct_earnout = st.sidebar.slider("% Earnout", 0, 100, step=5, key="pct_earnout") / 100
-pct_equity_rollover = st.sidebar.slider("% Equity Rollover", 0, 100, step=5, key="pct_equity_rollover") / 100
+    deal_total = pct_upfront_cash + pct_seller_note + pct_earnout + pct_equity_rollover
+    if abs(deal_total - 1.0) > 0.01:
+        st.warning(f"Deal structure sums to {deal_total*100:.0f}% (should be 100%)")
 
-deal_total = pct_upfront_cash + pct_seller_note + pct_earnout + pct_equity_rollover
-if abs(deal_total - 1.0) > 0.01:
-    st.sidebar.warning(f"Deal structure sums to {deal_total*100:.0f}% (should be 100%)")
+    st.markdown("---")
+    st.markdown("### Seller Note Terms")
+    note_rate = st.slider("Interest Rate (%)", 0.0, 10.0, 5.0, 0.25) / 100
+    note_term = st.number_input("Amortization Term (years)", value=5, min_value=1, max_value=10, key="note_term")
+    note_standstill = st.number_input(
+        "Standstill Period (years)", value=0, min_value=0, max_value=5, key="note_standstill",
+        help="Deferred start -- no principal payments during this period",
+    )
+    note_io_standstill = False
+    if note_standstill > 0:
+        note_io_standstill = st.checkbox(
+            "Pay interest during standstill",
+            value=True, key="note_io",
+            help="If unchecked, interest accrues (PIK) and is added to the balance",
+        )
 
-st.sidebar.markdown("---")
-
-# -- Seller Note Terms ---------------------------------------------------------
-st.sidebar.markdown("### Seller Note Terms")
-note_rate = st.sidebar.slider("Interest Rate (%)", 0.0, 10.0, 5.0, 0.25) / 100
-note_term = st.sidebar.number_input("Amortization Term (years)", value=5, min_value=1, max_value=10, key="note_term")
-note_standstill = st.sidebar.number_input(
-    "Standstill Period (years)", value=0, min_value=0, max_value=5, key="note_standstill",
-    help="Deferred start -- no principal payments during this period",
-)
-note_io_standstill = False
-if note_standstill > 0:
-    note_io_standstill = st.sidebar.checkbox(
-        "Pay interest during standstill",
-        value=True, key="note_io",
-        help="If unchecked, interest accrues (PIK) and is added to the balance",
+    st.markdown("---")
+    st.markdown("### Earnout Terms")
+    earnout_period = st.number_input("Earnout Period (years)", value=3, min_value=1, max_value=5)
+    earnout_metric = st.selectbox(
+        "Performance Metric",
+        ["Revenue Retention", "AUM Retention", "Client Retention"],
+        help="The KPI used to measure earnout achievement each year",
+    )
+    earnout_floor = st.slider(
+        "Earnout Floor (%)", 0, 100, 0, 5,
+        help="Minimum payout % per year regardless of performance",
+    )
+    earnout_cap = st.slider(
+        "Earnout Cap (%)", 100, 150, 125, 5,
+        help="Maximum payout % per year (allows upside above target)",
+    )
+    earnout_cliff = st.checkbox(
+        "Cliff Vesting",
+        value=False,
+        help="If checked, entire earnout pays out at end of period based on avg performance (vs. annual payouts)",
     )
 
-st.sidebar.markdown("---")
+# -- Debt & Tax expander (Financing + Tax) -------------------------------------
+# Created here; re-entered later for the Tax sub-section so both live in one
+# collapsible group on the sidebar.
+_exp_debt = st.sidebar.expander("Debt & Tax", expanded=False)
+with _exp_debt:
+    st.markdown("### Financing")
+    pct_self_funded = st.slider("% Self-Funded (of upfront cash)", 0, 100, 50, 5) / 100
+    loan_rate = st.slider("Loan Interest Rate (%)", 0.0, 12.0, 6.5, 0.25) / 100
+    loan_term = st.number_input("Loan Term (years)", value=7, min_value=1, max_value=15, key="loan_term")
 
-# -- Earnout Terms -------------------------------------------------------------
-st.sidebar.markdown("### Earnout Terms")
-earnout_period = st.sidebar.number_input("Earnout Period (years)", value=3, min_value=1, max_value=5)
-earnout_metric = st.sidebar.selectbox(
-    "Performance Metric",
-    ["Revenue Retention", "AUM Retention", "Client Retention"],
-    help="The KPI used to measure earnout achievement each year",
-)
-earnout_floor = st.sidebar.slider(
-    "Earnout Floor (%)", 0, 100, 0, 5,
-    help="Minimum payout % per year regardless of performance",
-)
-earnout_cap = st.sidebar.slider(
-    "Earnout Cap (%)", 100, 150, 125, 5,
-    help="Maximum payout % per year (allows upside above target)",
-)
-earnout_cliff = st.sidebar.checkbox(
-    "Cliff Vesting",
-    value=False,
-    help="If checked, entire earnout pays out at end of period based on avg performance (vs. annual payouts)",
-)
-
-st.sidebar.markdown("---")
-
-# -- Financing -----------------------------------------------------------------
-st.sidebar.markdown("### Financing")
-pct_self_funded = st.sidebar.slider("% Self-Funded (of upfront cash)", 0, 100, 50, 5) / 100
-loan_rate = st.sidebar.slider("Loan Interest Rate (%)", 0.0, 12.0, 6.5, 0.25) / 100
-loan_term = st.sidebar.number_input("Loan Term (years)", value=7, min_value=1, max_value=15, key="loan_term")
-
-with st.sidebar.expander("Advanced Loan Options"):
+    # Advanced loan options inlined (no nested expander - outer Debt & Tax
+    # is already collapsed by default, no need to double-collapse).
     loan_io_years = st.number_input(
         "Interest-Only Period (years)", value=0, min_value=0, max_value=5, key="loan_io",
         help="Pay only interest for this many years before amortization begins",
@@ -1819,60 +1826,70 @@ with st.sidebar.expander("Advanced Loan Options"):
             help="Payments calculated on this schedule; remaining balance due at loan term",
         )
 
-st.sidebar.markdown("---")
+# -- Advanced expander (Seller Transition + Integration + Buyer Profile) -------
+# Created here; re-entered later for Buyer Profile (which sits after the Tax
+# re-entry in source order) so all three advanced sub-sections live in a
+# single collapsible group on the sidebar.
+_exp_advanced = st.sidebar.expander("Advanced", expanded=False)
+with _exp_advanced:
+    st.markdown("### Seller Transition Terms")
+    consulting_annual = currency_input(
+        "Annual Consulting Fee ($)", 150_000, "consulting_fee",
+        help_text="Post-close consulting/advisory agreement with seller",
+        _container=_exp_advanced,
+    )
+    consulting_years = st.number_input(
+        "Consulting Duration (years)", value=2, min_value=0, max_value=5, key="consult_yrs",
+    )
+    noncompete_total = currency_input(
+        "Non-Compete Payment Total ($)", 100_000, "noncompete",
+        help_text="Total non-compete consideration paid to seller",
+        _container=_exp_advanced,
+    )
+    noncompete_years = st.number_input(
+        "Non-Compete Period (years)", value=3, min_value=0, max_value=7, key="nc_yrs",
+    )
 
-# -- Transition Compensation ---------------------------------------------------
-st.sidebar.markdown("### Seller Transition Terms")
-consulting_annual = currency_input(
-    "Annual Consulting Fee ($)", 150_000, "consulting_fee",
-    help_text="Post-close consulting/advisory agreement with seller",
-)
-consulting_years = st.sidebar.number_input(
-    "Consulting Duration (years)", value=2, min_value=0, max_value=5, key="consult_yrs",
-)
-noncompete_total = currency_input(
-    "Non-Compete Payment Total ($)", 100_000, "noncompete",
-    help_text="Total non-compete consideration paid to seller",
-)
-noncompete_years = st.sidebar.number_input(
-    "Non-Compete Period (years)", value=3, min_value=0, max_value=7, key="nc_yrs",
-)
+    st.markdown("---")
+    st.markdown("### Integration Assumptions")
+    st.caption(
+        "Full framework lives in the Integration tab. "
+        "Toggle below to override with flat values."
+    )
+    use_manual_integration = st.checkbox(
+        "Manual override (flat inputs)", value=False, key="manual_integration",
+        help="If on, use the flat synergy/cost inputs below. If off, the "
+             "ramped Part-E schedule from the Integration tab is used.",
+    )
+    integration_costs = currency_input(
+        "One-Time Integration Costs ($)", 150_000, "integration", _container=_exp_advanced,
+    )
+    annual_synergies = currency_input(
+        "Expected Annual Cost Synergies ($)", 100_000, "synergies", _container=_exp_advanced,
+    )
+    additional_staff = st.number_input("Additional Staff Needed", value=1, min_value=0, max_value=10)
+    integration_months = st.number_input("Integration Timeline (months)", value=12, min_value=3, max_value=36)
 
-st.sidebar.markdown("---")
+with _exp_debt:
+    # Re-enter the Debt & Tax expander to append Tax content alongside
+    # Financing in a single collapsible group.
+    st.markdown("---")
+    st.markdown("### Tax Impact")
+    tax_rate = st.slider(
+        "Buyer's Marginal Tax Rate (%)", 0, 50, 0, 1,
+        help="Applied to interest deductions for after-tax cash flow view",
+    ) / 100
 
-# -- Integration ---------------------------------------------------------------
-st.sidebar.markdown("### Integration Assumptions")
-st.sidebar.caption(
-    "Full framework lives in the Integration Strategy tab. "
-    "Toggle below to override with flat values."
-)
-use_manual_integration = st.sidebar.checkbox(
-    "Manual override (flat inputs)", value=False, key="manual_integration",
-    help="If on, use the flat synergy/cost inputs below. If off, the "
-         "ramped Part-E schedule from the Integration Strategy tab is used.",
-)
-integration_costs = currency_input("One-Time Integration Costs ($)", 150_000, "integration")
-annual_synergies = currency_input("Expected Annual Cost Synergies ($)", 100_000, "synergies")
-additional_staff = st.sidebar.number_input("Additional Staff Needed", value=1, min_value=0, max_value=10)
-integration_months = st.sidebar.number_input("Integration Timeline (months)", value=12, min_value=3, max_value=36)
-
-st.sidebar.markdown("---")
-
-# -- Tax -----------------------------------------------------------------------
-st.sidebar.markdown("### Tax Impact")
-tax_rate = st.sidebar.slider(
-    "Buyer's Marginal Tax Rate (%)", 0, 50, 0, 1,
-    help="Applied to interest deductions for after-tax cash flow view",
-) / 100
-
-st.sidebar.markdown("---")
-
-# -- Buyer Profile -------------------------------------------------------------
-st.sidebar.markdown("### Buyer Profile (Optional)")
-show_combined = st.sidebar.checkbox("Show Combined Entity View", value=False)
-buyer_aum = currency_input("Buyer's AUM ($)", 1_000_000_000, "buyer_aum") if show_combined else 0
-buyer_revenue = currency_input("Buyer's Revenue ($)", 8_000_000, "buyer_rev") if show_combined else 0
-buyer_margin = st.sidebar.slider("Buyer's EBITDA Margin (%)", 0, 60, 35, 5) / 100 if show_combined else 0
+with _exp_advanced:
+    # Re-enter the Advanced expander to append Buyer Profile after the Tax
+    # re-entry in source order. Visible order in the rendered sidebar:
+    # Seller Transition -> Integration -> Buyer Profile, all inside Advanced.
+    st.markdown("---")
+    st.markdown("### Buyer Profile (Optional)")
+    show_combined = st.checkbox("Show Combined Entity View", value=False)
+    buyer_aum = currency_input("Buyer's AUM ($)", 1_000_000_000, "buyer_aum", _container=_exp_advanced) if show_combined else 0
+    buyer_revenue = currency_input("Buyer's Revenue ($)", 8_000_000, "buyer_rev", _container=_exp_advanced) if show_combined else 0
+    buyer_margin = st.slider("Buyer's EBITDA Margin (%)", 0, 60, 35, 5) / 100 if show_combined else 0
 
 
 # ==============================================================================

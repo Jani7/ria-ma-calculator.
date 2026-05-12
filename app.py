@@ -900,6 +900,61 @@ def render_welcome_page():
             margin: 0;
         }
 
+        .how-it-works {
+            margin: 0 0 44px 0;
+        }
+        .how-it-works .eyebrow {
+            text-align: center;
+            color: #6b7385;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.10em;
+            text-transform: uppercase;
+            margin-bottom: 18px;
+        }
+        .how-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 14px;
+        }
+        @media (max-width: 768px) {
+            .how-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 480px) {
+            .how-grid { grid-template-columns: 1fr; }
+        }
+        .how-step {
+            background: #0e1118;
+            border: 1px solid #1c2230;
+            border-radius: 8px;
+            padding: 16px 16px 18px 16px;
+        }
+        .how-step .num {
+            display: inline-flex;
+            width: 22px; height: 22px;
+            background: rgba(124,140,255,0.12);
+            color: #95a3ff;
+            border: 1px solid rgba(124,140,255,0.30);
+            border-radius: 50%;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.72rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        .how-step h4 {
+            color: #ffffff;
+            font-size: 0.88rem;
+            font-weight: 600;
+            margin: 0 0 6px 0;
+        }
+        .how-step p {
+            color: #8b94a8;
+            font-size: 0.80rem;
+            line-height: 1.55;
+            margin: 0;
+        }
+
         .cta-row {
             display: flex;
             justify-content: center;
@@ -965,6 +1020,32 @@ def render_welcome_page():
                 <div class="feature-icon">&#9744;</div>
                 <h3>Debt Analysis</h3>
                 <p>Amortization with I/O periods, balloons, and standstill terms</p>
+            </div>
+        </div>
+
+        <div class="how-it-works">
+            <div class="eyebrow">How it works &mdash; 60 seconds</div>
+            <div class="how-grid">
+                <div class="how-step">
+                    <div class="num">1</div>
+                    <h4>Find the firm</h4>
+                    <p>Search by name in the sidebar &mdash; SEC Form ADV auto-fills AUM, client count, and an estimated fee-based revenue.</p>
+                </div>
+                <div class="how-step">
+                    <div class="num">2</div>
+                    <h4>Shape the deal</h4>
+                    <p>Set purchase price, then split it across upfront cash, seller note, earnout, and equity rollover. Suggested splits are one click away on Deal Summary.</p>
+                </div>
+                <div class="how-step">
+                    <div class="num">3</div>
+                    <h4>Stress-test it</h4>
+                    <p>Everything recalculates live. Returns &amp; Stress tab shows where the deal breaks under different attrition, growth, and multiple assumptions.</p>
+                </div>
+                <div class="how-step">
+                    <div class="num">4</div>
+                    <h4>Export the memo</h4>
+                    <p>Click Export PDF at the bottom of the calculator to download a full one-page deal memo with valuation, structure, returns, and integration economics.</p>
+                </div>
             </div>
         </div>
     </div>
@@ -2043,6 +2124,14 @@ seller_proceeds = compute_seller_total_proceeds(
 # ==============================================================================
 # MAIN PANEL
 # ==============================================================================
+# Help dialog — wraps render_instructions_tab() in a modal so users can pull
+# up the full guide without dedicating a top-level tab to it. The welcome page
+# carries a "How it works in 60s" condensed version for first-time visitors;
+# this dialog is for the returning user who wants the deeper walkthrough.
+@st.dialog("How to use this calculator", width="large")
+def _show_help_dialog():
+    render_instructions_tab()
+
 _hdr_left, _hdr_right = st.columns([6, 1])
 with _hdr_left:
     st.markdown(
@@ -2064,6 +2153,8 @@ with _hdr_right:
     if st.button("← Home", key="back_home", use_container_width=True):
         st.session_state.show_calculator = False
         st.rerun()
+    if st.button("Help & Examples", key="show_help_btn", use_container_width=True):
+        _show_help_dialog()
 
 # Out-of-scope warning for mega-RIAs. When AUM > $10B the revenue proxy is
 # disabled (fee structures vary too much) so we couldn't auto-scale the
@@ -2092,9 +2183,8 @@ st.caption(
     "Revenue estimated at 0.75% of AUM — actual figures vary by fee structure."
 )
 
-tab_summary, tab_financials, tab_returns, tab_integration, tab_help = st.tabs([
-    "Deal Summary", "Financials", "Returns & Stress",
-    "Integration", "Help & Examples",
+tab_summary, tab_financials, tab_returns, tab_integration = st.tabs([
+    "Deal Summary", "Financials", "Returns & Stress", "Integration",
 ])
 
 # ==============================================================================
@@ -2987,13 +3077,6 @@ with tab_integration:
         "spend of ~\\$630K. The schedule above adjusts those numbers for "
         "your specific inputs."
     )
-
-
-# ==============================================================================
-# TAB 6 -- Instructions
-# ==============================================================================
-with tab_help:
-    render_instructions_tab()
 
 
 # ==============================================================================

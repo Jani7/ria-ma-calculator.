@@ -227,10 +227,16 @@ st.set_page_config(page_title="RIA M&A Calculator", page_icon="📊", layout="wi
 #   --negative    #f87171   red
 _THEME_CSS = """
 <style>
+    /* ---- Web fonts ----------------------------------------------------- */
+    /* Inter for body + headings; IBM Plex Mono for digit-aligned inputs.
+       display=swap so first paint uses system fallback rather than blocking. */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
     /* ---- Typography ---------------------------------------------------- */
     html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
         -webkit-font-smoothing: antialiased;
-        font-feature-settings: "ss01", "cv11";
+        font-feature-settings: "ss01", "cv11", "tnum", "lnum";
     }
     .stApp { background-color: #0b0d12; color: #e5e9f0; }
 
@@ -296,8 +302,9 @@ _THEME_CSS = """
         outline: none !important;
     }
     section[data-testid="stSidebar"] .stTextInput input {
-        font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
-        font-size: 0.92rem;
+        font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Consolas', 'Menlo', monospace;
+        font-size: 0.88rem;
+        font-feature-settings: "tnum", "zero";
     }
     /* Tooltip — constrain width so the help-icon popover doesn't overflow
        on narrow viewports / sidebar. */
@@ -434,8 +441,9 @@ _THEME_CSS = """
         font-weight: 600;
         margin: 0;
         white-space: nowrap;
-        letter-spacing: -0.01em;
-        font-feature-settings: "tnum";
+        letter-spacing: -0.015em;
+        font-feature-settings: "tnum", "lnum", "zero";
+        font-variant-numeric: tabular-nums lining-nums;
     }
     .metric-card .positive { color: #4ade80; }
     .metric-card .negative { color: #f87171; }
@@ -485,6 +493,15 @@ _THEME_CSS = """
         border: 1px solid #1c2230;
         border-radius: 8px;
         overflow: hidden;
+    }
+    /* Tabular figures inside data tables — column digits stack consistently
+       so the eye reads down a column instead of zig-zagging. */
+    .stDataFrame [role="gridcell"],
+    [data-testid="stDataFrame"] [role="gridcell"],
+    .stDataFrame [role="grid"],
+    [data-testid="stDataFrame"] [role="grid"] {
+        font-feature-settings: "tnum", "lnum", "zero";
+        font-variant-numeric: tabular-nums lining-nums;
     }
 
     /* ---- Dialogs (reconciliation modal) ------------------------------- */
@@ -760,6 +777,12 @@ def render_welcome_page():
     """Render the welcome/landing page with the sidebar hidden. Dark-theme only."""
     st.markdown("""
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        html, body, .stApp {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            font-feature-settings: "ss01", "cv11";
+        }
         [data-testid="stSidebar"] { display: none; }
         [data-testid="stSidebarCollapsedControl"] { display: none; }
         .block-container { padding-top: 3.5rem !important; }

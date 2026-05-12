@@ -2061,16 +2061,15 @@ st.caption(
     "Revenue estimated at 0.75% of AUM — actual figures vary by fee structure."
 )
 
-tab1, tab2, tab3, tab4, tab5, tab7, tab6 = st.tabs([
-    "Deal Summary", "Pro Forma Financials", "Sensitivity Analysis",
-    "Earnout & Seller Economics", "Debt Analysis",
-    "Integration Strategy", "Instructions",
+tab_summary, tab_financials, tab_returns, tab_integration, tab_help = st.tabs([
+    "Deal Summary", "Financials", "Returns & Stress",
+    "Integration", "Help & Examples",
 ])
 
 # ==============================================================================
 # TAB 1 -- Deal Summary
 # ==============================================================================
-with tab1:
+with tab_summary:
     # ---- Valuation Band (banker-MD memo, Part B) ----
     # The headline answer to "what is this firm worth?" — a defensible
     # range built from a multi-factor model the user can stress-test, NOT
@@ -2390,7 +2389,7 @@ with tab1:
 # ==============================================================================
 # TAB 2 -- Pro Forma Financials
 # ==============================================================================
-with tab2:
+with tab_financials:
     st.markdown('<div class="section-header">5-Year Pro Forma P&L</div>', unsafe_allow_html=True)
 
     display_pf = pro_forma[pro_forma["year"] <= 5].copy()
@@ -2469,7 +2468,7 @@ with tab2:
 # ==============================================================================
 # TAB 3 -- Sensitivity Analysis
 # ==============================================================================
-with tab3:
+with tab_returns:
     base_params = dict(
         revenue=annual_revenue, ebitda=ebitda, owner_comp=owner_comp,
         growth_rate=rev_growth, attrition_rate=attrition_rate, aum=aum,
@@ -2546,7 +2545,9 @@ with tab3:
 # ==============================================================================
 # TAB 4 -- Earnout & Seller Economics
 # ==============================================================================
-with tab4:
+with tab_returns:
+    # Re-enter the same tab to append Earnout content after Sensitivity.
+    st.divider()
     total_earnout_amount = purchase_price * pct_earnout
 
     st.markdown('<div class="section-header">Earnout Payout Scenarios</div>', unsafe_allow_html=True)
@@ -2628,7 +2629,9 @@ with tab4:
 # ==============================================================================
 # TAB 5 -- Debt Analysis
 # ==============================================================================
-with tab5:
+with tab_financials:
+    # Re-enter the same tab to append Debt content after Pro Forma.
+    st.divider()
     st.markdown('<div class="section-header">Loan Amortization Schedule</div>', unsafe_allow_html=True)
 
     # Show loan config summary
@@ -2711,7 +2714,7 @@ with tab5:
 # ==============================================================================
 # TAB 7 -- Integration Strategy (banker-MD memo, Part E)
 # ==============================================================================
-with tab7:
+with tab_integration:
     st.markdown(
         '<div class="section-header">Integration Strategy</div>',
         unsafe_allow_html=True,
@@ -2947,7 +2950,7 @@ with tab7:
 # ==============================================================================
 # TAB 6 -- Instructions
 # ==============================================================================
-with tab6:
+with tab_help:
     render_instructions_tab()
 
 

@@ -1545,11 +1545,14 @@ def _sec_field_badge(field_key: str, sec_value, fmt_fn, label: str):
 st.sidebar.markdown("### Target Firm")
 _sec = st.session_state.sec_data
 
-aum = currency_input("AUM ($)", 500_000_000, "aum")
+# Firm-data inputs default to 0 so the calculator opens as a clean slate.
+# Users either search a firm by name (SEC auto-fills) or enter values manually.
+# Pre-populating with sample values anchored users on numbers that weren't theirs.
+aum = currency_input("AUM ($)", 0, "aum")
 if _sec is not None:
     _sec_field_badge("aum", int(_sec.aum), lambda v: f"${v:,.0f}", "AUM")
 
-annual_revenue = currency_input("Annual Revenue ($)", 4_000_000, "revenue")
+annual_revenue = currency_input("Annual Revenue ($)", 0, "revenue")
 # Above ~$10B AUM the 0.75% blended-fee assumption breaks down (institutional
 # share classes, performance fees, family-office economics, etc.), so we
 # refuse to offer the estimate rather than risk anchoring the user on a
@@ -1569,17 +1572,17 @@ if _sec is not None:
             lambda v: f"${v:,.0f} · est only (AUM × 0.75%, not filed)", "Revenue",
         )
 
-ebitda = currency_input("EBITDA ($)", 1_600_000, "ebitda")
-owner_comp = currency_input("Owner's Compensation ($)", 500_000, "owner_comp")
+ebitda = currency_input("EBITDA ($)", 0, "ebitda")
+owner_comp = currency_input("Owner's Compensation ($)", 0, "owner_comp")
 
-num_clients = count_input("Number of Clients", 200, "num_clients")
+num_clients = count_input("Number of Clients", 0, "num_clients")
 if _sec is not None and _sec.num_clients and _sec.num_clients > 0:
     _sec_field_badge(
         "num_clients", int(_sec.num_clients), lambda v: f"{v:,}", "Clients"
     )
 
 if "rev_growth_pct" not in st.session_state:
-    st.session_state["rev_growth_pct"] = 5.0
+    st.session_state["rev_growth_pct"] = 0.0
 # Slider tops out at 30%; anything beyond is so anomalous that the user
 # should manually enter rather than have the AUM-proxy auto-fill it.
 _GROWTH_SLIDER_MAX = 30.0
@@ -1600,8 +1603,8 @@ if _sec is not None and _sec.growth_rate is not None:
         _badge_fmt = lambda v: f"{v:.1f}% YoY AUM (proxy)"
     _sec_field_badge("rev_growth_pct", _capped_pct, _badge_fmt, "Growth")
 
-pct_recurring = st.sidebar.slider("% Recurring Revenue", 50, 100, 90, 5)
-attrition_rate = st.sidebar.slider("Client Attrition Rate (%)", 0.0, 20.0, 5.0, 0.5) / 100
+pct_recurring = st.sidebar.slider("% Recurring Revenue", 0, 100, 0, 5, key="pct_recurring")
+attrition_rate = st.sidebar.slider("Client Attrition Rate (%)", 0.0, 20.0, 0.0, 0.5, key="attrition_rate") / 100
 
 
 # -- Reconciliation dialog (shown once after each successful lookup) -----------
@@ -1737,11 +1740,12 @@ if st.session_state.pending_reconcile and st.session_state.sec_data is not None:
 _exp_deal = st.sidebar.expander("Deal Structure", expanded=False)
 with _exp_deal:
     st.markdown("### Deal Terms")
-    price_method = st.radio("Purchase Price Method", ["Enter Price", "Select Multiple"])
+    price_method = st.radio("Purchase Price Method", ["Enter Price", "Select Multiple"],
+                            key="price_method")
     if price_method == "Enter Price":
-        purchase_price = currency_input("Purchase Price ($)", 8_000_000, "purchase_price", _container=_exp_deal)
+        purchase_price = currency_input("Purchase Price ($)", 0, "purchase_price", _container=_exp_deal)
     else:
-        rev_multiple = st.slider("Revenue Multiple", 1.0, 5.0, 2.0, 0.1)
+        rev_multiple = st.slider("Revenue Multiple", 1.0, 5.0, 2.0, 0.1, key="rev_multiple")
         purchase_price = int(annual_revenue * rev_multiple)
         st.info(f"Implied Price: {fmt_dollar(purchase_price)}")
 
@@ -1762,7 +1766,7 @@ with _exp_deal:
 
     st.markdown("---")
     st.markdown("### Seller Note Terms")
-    note_rate = st.slider("Interest Rate (%)", 0.0, 10.0, 5.0, 0.25) / 100
+    note_rate = st.slider("Interest Rate (%)", 0.0, 10.0, 5.0, 0.25, key="note_rate") / 100
     note_term = st.number_input("Amortization Term (years)", value=5, min_value=1, max_value=10, key="note_term")
     note_standstill = st.number_input(
         "Standstill Period (years)", value=0, min_value=0, max_value=5, key="note_standstill",
@@ -1778,23 +1782,28 @@ with _exp_deal:
 
     st.markdown("---")
     st.markdown("### Earnout Terms")
-    earnout_period = st.number_input("Earnout Period (years)", value=3, min_value=1, max_value=5)
+    earnout_period = st.number_input("Earnout Period (years)", value=3, min_value=1, max_value=5,
+                                     key="earnout_period")
     earnout_metric = st.selectbox(
         "Performance Metric",
         ["Revenue Retention", "AUM Retention", "Client Retention"],
+        key="earnout_metric",
         help="The KPI used to measure earnout achievement each year",
     )
     earnout_floor = st.slider(
         "Earnout Floor (%)", 0, 100, 0, 5,
+        key="earnout_floor",
         help="Minimum payout % per year regardless of performance",
     )
     earnout_cap = st.slider(
         "Earnout Cap (%)", 100, 150, 125, 5,
+        key="earnout_cap",
         help="Maximum payout % per year (allows upside above target)",
     )
     earnout_cliff = st.checkbox(
         "Cliff Vesting",
         value=False,
+        key="earnout_cliff",
         help="If checked, entire earnout pays out at end of period based on avg performance (vs. annual payouts)",
     )
 
@@ -1804,8 +1813,9 @@ with _exp_deal:
 _exp_debt = st.sidebar.expander("Debt & Tax", expanded=False)
 with _exp_debt:
     st.markdown("### Financing")
-    pct_self_funded = st.slider("% Self-Funded (of upfront cash)", 0, 100, 50, 5) / 100
-    loan_rate = st.slider("Loan Interest Rate (%)", 0.0, 12.0, 6.5, 0.25) / 100
+    pct_self_funded = st.slider("% Self-Funded (of upfront cash)", 0, 100, 50, 5,
+                                key="pct_self_funded") / 100
+    loan_rate = st.slider("Loan Interest Rate (%)", 0.0, 12.0, 6.5, 0.25, key="loan_rate") / 100
     loan_term = st.number_input("Loan Term (years)", value=7, min_value=1, max_value=15, key="loan_term")
 
     # Advanced loan options inlined (no nested expander - outer Debt & Tax
@@ -1867,8 +1877,10 @@ with _exp_advanced:
     annual_synergies = currency_input(
         "Expected Annual Cost Synergies ($)", 100_000, "synergies", _container=_exp_advanced,
     )
-    additional_staff = st.number_input("Additional Staff Needed", value=1, min_value=0, max_value=10)
-    integration_months = st.number_input("Integration Timeline (months)", value=12, min_value=3, max_value=36)
+    additional_staff = st.number_input("Additional Staff Needed", value=1, min_value=0, max_value=10,
+                                       key="additional_staff")
+    integration_months = st.number_input("Integration Timeline (months)", value=12, min_value=3, max_value=36,
+                                         key="integration_months")
 
 with _exp_debt:
     # Re-enter the Debt & Tax expander to append Tax content alongside
@@ -1877,6 +1889,7 @@ with _exp_debt:
     st.markdown("### Tax Impact")
     tax_rate = st.slider(
         "Buyer's Marginal Tax Rate (%)", 0, 50, 0, 1,
+        key="tax_rate",
         help="Applied to interest deductions for after-tax cash flow view",
     ) / 100
 
@@ -1886,10 +1899,11 @@ with _exp_advanced:
     # Seller Transition -> Integration -> Buyer Profile, all inside Advanced.
     st.markdown("---")
     st.markdown("### Buyer Profile (Optional)")
-    show_combined = st.checkbox("Show Combined Entity View", value=False)
+    show_combined = st.checkbox("Show Combined Entity View", value=False, key="show_combined")
     buyer_aum = currency_input("Buyer's AUM ($)", 1_000_000_000, "buyer_aum", _container=_exp_advanced) if show_combined else 0
     buyer_revenue = currency_input("Buyer's Revenue ($)", 8_000_000, "buyer_rev", _container=_exp_advanced) if show_combined else 0
-    buyer_margin = st.slider("Buyer's EBITDA Margin (%)", 0, 60, 35, 5) / 100 if show_combined else 0
+    buyer_margin = st.slider("Buyer's EBITDA Margin (%)", 0, 60, 35, 5,
+                             key="buyer_margin") / 100 if show_combined else 0
 
 
 # ==============================================================================
@@ -2087,6 +2101,17 @@ tab_summary, tab_financials, tab_returns, tab_integration, tab_help = st.tabs([
 # TAB 1 -- Deal Summary
 # ==============================================================================
 with tab_summary:
+    # Empty state: when the user hasn't entered firm data yet, surface a
+    # clear get-started callout. The metrics below still render (as zeros)
+    # so the user can see the layout they'll fill in.
+    if aum == 0 and annual_revenue == 0 and ebitda == 0:
+        st.info(
+            "**Get started.** Search for a firm by name in the sidebar to "
+            "auto-fill from SEC Form ADV, or open the **Target Firm** "
+            "section in the sidebar and enter values manually. The "
+            "calculator updates live as you type."
+        )
+
     # ---- Valuation Band (banker-MD memo, Part B) ----
     # The headline answer to "what is this firm worth?" — a defensible
     # range built from a multi-factor model the user can stress-test, NOT

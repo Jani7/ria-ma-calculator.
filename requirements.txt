@@ -5,3 +5,4 @@ plotly==6.5.2
 fpdf2==2.8.7
 pyarrow==23.0.1
 rapidfuzz==3.14.5
+supabase==2.13.0

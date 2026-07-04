@@ -6,6 +6,12 @@
 [server]
 headless = true
 
+[global]
+# Manifest widgets pass explicit defaults AND get values via the Session
+# State API on share-link/saved-deal restore — suppress the once-per-process
+# benign warning that combination triggers.
+disableWidgetStateDuplicationWarning = true
+
 [theme]
 base = "dark"
 primaryColor = "#7c8cff"

@@ -20,6 +20,11 @@ from calculations import (
     lookup_comps_band,
 )
 import sec_lookup
+import insights as ins
+from comps_editor import get_active_comps_df, render_comps_editor
+from memo_mode import render_memo_tab, MEMO_CSS
+import auth
+import persistence
 import html as _html
 import tempfile
 import threading
@@ -171,34 +176,8 @@ def _load_adv_df():
     return _load_adv_df_by_path(str(p) if p else "")
 
 
-# -- Comps database ------------------------------------------------------------
-_COMPS_CSV_PATH = Path(__file__).parent / "data" / "ria_ma_comps.csv"
-
-
-@st.cache_data(show_spinner=False)
-def _load_comps_df():
-    """Load the manually curated RIA M&A transaction database.
-
-    Returns an empty DataFrame (with the expected columns) when the file is
-    missing, so the rest of the app keeps rendering. The file ships in-repo
-    at data/ria_ma_comps.csv; refresh quarterly per scripts/seed_comps.py.
-    """
-    cols = [
-        "date", "buyer", "seller", "seller_aum",
-        "ev_revenue_multiple", "ev_ebitda_multiple",
-        "aum_tier", "recurring_tier", "channel", "source_url", "notes",
-    ]
-    if not _COMPS_CSV_PATH.exists():
-        return pd.DataFrame(columns=cols)
-    try:
-        df = pd.read_csv(_COMPS_CSV_PATH)
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        for c in ("seller_aum", "ev_revenue_multiple", "ev_ebitda_multiple"):
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        return df
-    except Exception:
-        return pd.DataFrame(columns=cols)
-
+# Comps loading moved to comps_editor.get_active_comps_df() — mtime-keyed
+# cache plus the user's session edits overlaid on the bundled CSV.
 
 # -- Page config ---------------------------------------------------------------
 st.set_page_config(page_title="RIA M&A Calculator", page_icon="📊", layout="wide")
@@ -580,6 +559,10 @@ _THEME_CSS = """
 """
 
 st.markdown(_THEME_CSS, unsafe_allow_html=True)
+# Insight + memo component styles ship with their modules (single source of
+# truth beside the code that emits the markup). One injection per rerun,
+# never per render — spec implementation note 2.
+st.markdown(f"<style>{ins.INSIGHT_CSS}{MEMO_CSS}</style>", unsafe_allow_html=True)
 
 
 def render_site_footer():
@@ -1420,6 +1403,13 @@ def count_input(label, default, key, help_text=None, _container=None):
         return default
 
 
+# Shared-deal links: decode ?d=... once per session and queue a full input
+# restore. Must run (a) AFTER _queue_apply/_apply_pending are defined,
+# (b) BEFORE the welcome gate — the function flips show_calculator=True so a
+# link recipient lands on the calculator, not the welcome page — and
+# (c) BEFORE _apply_pending() flushes queued values into the widgets.
+persistence.apply_deal_from_url(_queue_apply)
+
 # ==============================================================================
 # WELCOME PAGE GATE
 # ==============================================================================
@@ -1985,6 +1975,18 @@ with _exp_advanced:
     buyer_margin = st.slider("Buyer's EBITDA Margin (%)", 0, 60, 35, 5,
                              key="buyer_margin") / 100 if show_combined else 0
 
+# -- Account & saved deals ------------------------------------------------------
+# Auth renders nothing when Supabase secrets are absent; the header is gated
+# the same way so an empty "Account" section never shows. Share links (inside
+# render_save_controls) work in every environment, no sign-in needed.
+if auth.auth_available():
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("#### Account")
+    auth.render_auth_widget()
+st.sidebar.markdown("---")
+persistence.render_save_controls(_queue_apply)
+persistence.render_my_deals(_queue_apply)
+
 
 # ==============================================================================
 # CALCULATIONS
@@ -2043,7 +2045,9 @@ synergy_schedule = compute_synergy_schedule(
 )
 _active_synergy_schedule = None if use_manual_integration else synergy_schedule
 
-pro_forma = build_pro_forma(
+# Kwargs captured as a dict so the insight layer can honestly re-run the
+# engine for its synergy-capture and attrition-headroom stress scans.
+_pf_kwargs = dict(
     revenue=annual_revenue, ebitda=ebitda, owner_comp=owner_comp,
     growth_rate=rev_growth, attrition_rate=attrition_rate, aum=aum,
     purchase_price=purchase_price, pct_upfront=pct_upfront_cash,
@@ -2063,6 +2067,7 @@ pro_forma = build_pro_forma(
     replacement_cost=replacement_cost,
     synergy_schedule=_active_synergy_schedule,
 )
+pro_forma = build_pro_forma(**_pf_kwargs)
 
 # Build schedules separately so they can be passed into compute_irr_and_returns
 # for the terminal-value debt subtraction. Without this, a 60%-leverage Y5
@@ -2119,6 +2124,43 @@ seller_proceeds = compute_seller_total_proceeds(
     consulting_annual=consulting_annual, consulting_years=consulting_years,
     noncompete_total=noncompete_total, noncompete_years=noncompete_years,
 )
+
+# ---- Insight layer (insights.py) ---------------------------------------------
+# The comps band is computed once here (confirmed-aware, honoring the editor's
+# include-estimated toggle) and shared by Tab 1, the insight ctx, and the memo —
+# three consumers, one source of truth.
+_comps_df_active = get_active_comps_df()
+_include_est = bool(st.session_state.get("_comps_include_estimated", False))
+_comps_band = (
+    lookup_comps_band(aum, pct_recurring, _comps_df_active,
+                      include_estimated=_include_est)
+    if len(_comps_df_active) > 0 else None
+)
+
+_insight_ctx = {
+    "purchase_price": purchase_price,
+    "valuation": valuation,
+    "returns": returns,
+    "pro_forma": pro_forma,  # dscr column already attached above
+    "synergy_schedule": _active_synergy_schedule,  # None => manual-override info state
+    "comps": _comps_band,
+    "inputs": {
+        "aum": aum, "revenue": annual_revenue, "ebitda": ebitda,
+        "pct_recurring": pct_recurring, "attrition_rate": attrition_rate,
+        "growth_rate": rev_growth,
+    },
+    # Extension keys: enable the honest engine re-runs for the synergy-capture
+    # and attrition-headroom insights. Omitting them just drops those two.
+    "pro_forma_kwargs": _pf_kwargs,
+    "irr_kwargs": dict(
+        purchase_price=purchase_price, pct_upfront=pct_upfront_cash,
+        pct_self_funded=pct_self_funded, pct_equity_rollover=pct_equity_rollover,
+        pct_recurring=pct_recurring,
+        loan_schedule=_loan_sched_for_irr, note_schedule=_note_sched_for_irr,
+        pct_seller_note=pct_seller_note,
+    ),
+}
+deal_insights = ins.compute_all_insights(_insight_ctx)
 
 # ==============================================================================
 # MAIN PANEL
@@ -2182,8 +2224,8 @@ st.caption(
     "Revenue estimated at 0.75% of AUM — actual figures vary by fee structure."
 )
 
-tab_summary, tab_financials, tab_returns, tab_integration = st.tabs([
-    "Deal Summary", "Financials", "Returns & Stress", "Integration",
+tab_summary, tab_financials, tab_returns, tab_integration, tab_memo = st.tabs([
+    "Deal Summary", "Financials", "Returns & Stress", "Integration", "Deal Memo",
 ])
 
 # ==============================================================================
@@ -2213,6 +2255,9 @@ with tab_summary:
         st.markdown(metric_card("Mid", fmt_dollar(valuation["mid"]), "accent"), unsafe_allow_html=True)
     with vb3:
         st.markdown(metric_card("High", fmt_dollar(valuation["high"]), "neutral"), unsafe_allow_html=True)
+    _sel = ins.select_insight(deal_insights, "valuation")
+    if _sel is not None:
+        st.markdown(ins.render_insight(_sel, with_microviz=True), unsafe_allow_html=True)
     _f = valuation["factors"]
     # Two clean lines: methodology + factor breakdown + verdict. Avoiding
     # inline bold mid-sentence keeps the typography consistent with the
@@ -2237,15 +2282,9 @@ with tab_summary:
         f"Geo {_f['geography']:.2f}× · "
         f"Key-person {_f['key_person']:.2f}×"
     )
-    if valuation["low"] <= purchase_price <= valuation["high"]:
-        _verdict = f"Your entered price ({fmt_dollar(purchase_price)}) is in band."
-    elif purchase_price < valuation["low"]:
-        _verdict = (f"Your entered price ({fmt_dollar(purchase_price)}) is below band "
-                    "— possible bargain or hidden risk.")
-    else:
-        _verdict = (f"Your entered price ({fmt_dollar(purchase_price)}) is above band "
-                    "— verify upside drivers or expect margin compression.")
-    st.caption(_verdict)
+    # (Prose bid-vs-band verdict removed — the insight strip above carries it
+    # with severity color and the band micro-viz; duplicating it as a caption
+    # was the "numbers AND words to interpret" density problem.)
     if aum > 10e9:
         st.caption(
             "Mega-RIA caveat: at $10B+ AUM, valuations are bespoke and driven by "
@@ -2292,18 +2331,34 @@ with tab_summary:
     # ---- Comps Overlay (banker memo, Part D) ----
     # Anchor the firm's implied EBITDA multiple against a curated database
     # so a banker can read "where does this deal price vs comps" at a glance.
-    comps_df = _load_comps_df()
+    # Frame + band are hoisted to the insight-layer block (single source of
+    # truth shared with insights and the memo); estimates sit out of the band
+    # unless the user opts in via the editor's toggle.
+    comps_df = _comps_df_active
     if len(comps_df) > 0:
         st.markdown('<div class="section-header">Comparable Transactions</div>', unsafe_allow_html=True)
-        band = lookup_comps_band(aum, pct_recurring, comps_df)
+        band = _comps_band
         deal_ebitda_mult = (purchase_price / valuation["adj_ebitda"]) if valuation["adj_ebitda"] > 0 else 0
 
         ev = band.get("ev_ebitda")
         if ev is None:
-            st.caption(
-                f"Too few comps in the {band['aum_tier']} x {band['recurring_tier']} slice "
-                "to produce a meaningful band. Showing the full transaction table below."
-            )
+            _n_conf = band.get("n_confirmed", 0)
+            _n_excl = band.get("n_estimated_excluded", 0)
+            if _n_excl > 0:
+                st.caption(
+                    f"Not enough confirmed deals to draw a band — the database "
+                    f"holds {_n_conf} deal{'s' if _n_conf != 1 else ''} with "
+                    f"publicly disclosed terms ({_n_excl} estimate"
+                    f"{'s' if _n_excl != 1 else ''} excluded). Real RIA deal "
+                    "terms are rarely public; a thin N here is the honest "
+                    "picture. Add your own comps below, or include the "
+                    "estimated rows to see a modeled band."
+                )
+            else:
+                st.caption(
+                    f"Too few comps in the {band['aum_tier']} x {band['recurring_tier']} slice "
+                    "to produce a meaningful band. Showing the full transaction table below."
+                )
         else:
             if ev["p25"] <= deal_ebitda_mult <= ev["p75"]:
                 deal_class, verdict = "positive", "in band"
@@ -2335,6 +2390,14 @@ with tab_summary:
             )
 
         plot_df = comps_df.dropna(subset=["ev_ebitda_multiple", "seller_aum"]).copy()
+        # Keep the chart consistent with what the band actually used: when
+        # estimates are excluded from the benchmark, hide them here too and
+        # say so, instead of plotting 39 dots against a 4-deal band.
+        _n_hidden = 0
+        if not _include_est and "is_estimated" in plot_df.columns:
+            _n_before = len(plot_df)
+            plot_df = plot_df[~plot_df["is_estimated"].fillna(True).astype(bool)]
+            _n_hidden = _n_before - len(plot_df)
         if len(plot_df) > 0:
             try:
                 fig_scatter = px.scatter(
@@ -2376,42 +2439,31 @@ with tab_summary:
                                           title="Peer Transactions — EV/EBITDA by Seller AUM",
                                           height=420)
                 st.plotly_chart(fig_scatter, use_container_width=True)
+                if _n_hidden:
+                    st.caption(
+                        f"{_n_hidden} estimated deals hidden from this chart — "
+                        "flip the toggle in the browser below to plot them too."
+                    )
             except Exception as _e:
                 st.caption(f"(Peer scatter unavailable: {type(_e).__name__})")
 
         with st.expander("Browse transaction database", expanded=False):
-            f1, f2 = st.columns(2)
-            aum_tier_opts = ["All"] + sorted(comps_df["aum_tier"].dropna().unique().tolist())
-            channel_opts = ["All"] + sorted(comps_df["channel"].dropna().unique().tolist())
-            with f1:
-                _aum_filter = st.selectbox("AUM tier", aum_tier_opts, key="comps_aum_filter")
-            with f2:
-                _ch_filter = st.selectbox("Channel", channel_opts, key="comps_channel_filter")
+            render_comps_editor()
 
-            tbl = comps_df.copy()
-            if _aum_filter != "All":
-                tbl = tbl[tbl["aum_tier"] == _aum_filter]
-            if _ch_filter != "All":
-                tbl = tbl[tbl["channel"] == _ch_filter]
-
-            display = pd.DataFrame({
-                "Date": tbl["date"].dt.strftime("%Y-%m-%d"),
-                "Buyer": tbl["buyer"],
-                "Seller": tbl["seller"],
-                "Seller AUM": tbl["seller_aum"].apply(fmt_dollar),
-                "EV/EBITDA": tbl["ev_ebitda_multiple"].apply(
-                    lambda v: f"{v:.1f}x" if pd.notna(v) else "—"
-                ),
-                "EV/Revenue": tbl["ev_revenue_multiple"].apply(
-                    lambda v: f"{v:.2f}x" if pd.notna(v) else "—"
-                ),
-            }).sort_values("Date", ascending=False)
-            st.dataframe(display, use_container_width=True, hide_index=True)
-
+        _est_flags = (
+            comps_df["is_estimated"].fillna(True).astype(bool)
+            if "is_estimated" in comps_df.columns
+            else pd.Series(False, index=comps_df.index)
+        )
+        _n_est_rows = int(_est_flags.sum())
+        _n_conf_rows = len(comps_df) - _n_est_rows
         st.caption(
-            "Comps reflect publicly disclosed terms; private mid-market deals "
-            "skew unrepresented and may trade 0.5-1.0x lower than headline "
-            f"aggregator transactions. N = {len(comps_df)}."
+            f"{_n_conf_rows} of these {len(comps_df)} deals have publicly "
+            f"disclosed or derivable terms (sources and arithmetic in "
+            f"data/SOURCES.md); the other {_n_est_rows} are flagged estimates "
+            "and sit out of the benchmark unless you opt them in above. "
+            "Private mid-market deals rarely disclose terms and may trade "
+            "0.5-1.0x below these headline transactions."
         )
 
     st.markdown('<div class="section-header">Purchase Price & Implied Multiples</div>', unsafe_allow_html=True)
@@ -2543,6 +2595,9 @@ with tab_financials:
             display_pf_fmt[col] = display_pf_fmt[col].apply(lambda x: f"${x:,.0f}")
     display_pf_fmt.columns = col_names
     st.dataframe(display_pf_fmt, use_container_width=True, hide_index=True)
+    _sel = ins.select_insight(deal_insights, "financials")
+    if _sel is not None:
+        st.markdown(ins.render_insight(_sel, with_microviz=True), unsafe_allow_html=True)
 
     # Combined entity view
     if show_combined and buyer_revenue > 0:
@@ -2619,6 +2674,10 @@ with tab_returns:
         tax_rate=tax_rate,
         synergy_schedule=_active_synergy_schedule,
     )
+
+    _sel = ins.select_insight(deal_insights, "returns")
+    if _sel is not None:
+        st.markdown(ins.render_insight(_sel, with_microviz=True), unsafe_allow_html=True)
 
     st.markdown('<div class="section-header">IRR Sensitivity: Revenue Multiple vs. Client Attrition</div>', unsafe_allow_html=True)
 
@@ -3006,6 +3065,9 @@ with tab_integration:
             fmt_dollar(_npv),
             "accent" if _npv > 0 else "neutral",
         ), unsafe_allow_html=True)
+    _sel = ins.select_insight(deal_insights, "integration")
+    if _sel is not None:
+        st.markdown(ins.render_insight(_sel, with_microviz=True), unsafe_allow_html=True)
 
     _cap_factor = schedule.attrs["capability_factor"]
     _total_rr = schedule.attrs["runrate_total_synergy"]
@@ -3079,6 +3141,40 @@ with tab_integration:
 
 
 # ==============================================================================
+# TAB 5 -- Deal Memo (5-page IC-ready document + PDF)
+# ==============================================================================
+with tab_memo:
+    # Display-only frame for the page-5 table: estimated deals still list
+    # (flagged Est.) but never feed the band, which stays confirmed-aware
+    # via the hoisted _comps_band shared with Tab 1 and the insight layer.
+    _memo_comps_table = (
+        lookup_comps_band(aum, pct_recurring, _comps_df_active,
+                          include_estimated=True).get("slice_df")
+        if len(_comps_df_active) > 0 else None
+    )
+    _memo_ctx = dict(_insight_ctx)
+    _memo_ctx["inputs"] = dict(
+        _insight_ctx["inputs"],
+        owner_comp=owner_comp, num_clients=num_clients,
+        integration_costs=integration_costs, annual_synergies=annual_synergies,
+        pct_upfront=pct_upfront_cash, pct_seller_note=pct_seller_note,
+        pct_earnout=pct_earnout, pct_equity_rollover=pct_equity_rollover,
+        pct_self_funded=pct_self_funded,
+    )
+    _memo_extras = dict(
+        firm_name=(st.session_state.sec_data.firm_name
+                   if st.session_state.sec_data is not None else None),
+        suggested_deal=suggested_deal,
+        structure_actual=dict(
+            upfront=pct_upfront_cash, note=pct_seller_note,
+            earnout=pct_earnout, rollover=pct_equity_rollover,
+        ),
+        comps_table_df=_memo_comps_table,
+    )
+    render_memo_tab(_memo_ctx, _memo_extras)
+
+
+# ==============================================================================
 # FOOTER -- PDF Export
 # ==============================================================================
 st.markdown("---")
@@ -3127,5 +3223,9 @@ if st.button("Export Full Analysis to PDF", type="primary"):
         import logging
         logging.exception("PDF generation failed (%s)", type(e).__name__)
         st.error("PDF generation failed. Please try again or contact support if the issue persists.")
+
+st.markdown("### Share This Deal")
+st.caption("Anyone with this link opens this exact deal — no sign-in needed.")
+st.code(persistence.get_share_url(persistence.capture_deal_state()), language=None)
 
 render_site_footer()

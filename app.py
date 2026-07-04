@@ -1698,8 +1698,8 @@ def _render_reconcile_dialog():
         )
         st.caption(
             f"Filing as of {sec.as_of_date or 'unknown'}. "
-            f"Each field defaults to **Keep mine** — flip to SEC only for fields "
-            f"you want overwritten."
+            f"Each field defaults to the **SEC value** — flip any back to "
+            f"Keep mine if you'd rather hold your own number."
         )
 
         decisions: dict[str, tuple[str, object]] = {}
@@ -1709,7 +1709,10 @@ def _render_reconcile_dialog():
             choice = st.radio(
                 label,
                 options=[f"Keep mine: {current_display}", f"SEC: {sec_display}"],
-                index=0,  # default to "Keep mine" — never silently overwrite user inputs
+                # Default to SEC: the user just searched for this firm, and with
+                # blank-slate defaults "Keep mine: $0" is never what they want.
+                # The dialog still shows both values before anything applies.
+                index=1,
                 horizontal=True,
                 key=f"reconcile_radio_{key}",
                 label_visibility="collapsed",
@@ -2224,6 +2227,67 @@ st.caption(
     "Revenue estimated at 0.75% of AUM — actual figures vary by fee structure."
 )
 
+# ---- Setup prompts -------------------------------------------------------------
+# Guided input card: the analytics need a handful of values, and making users
+# hunt for them in the sidebar scroll was a real drop-off point. Surface the
+# missing essentials as inline fields in the main panel; SEC auto-fill covers
+# AUM / revenue / clients, so post-lookup this card typically shrinks to the
+# three values a filing can't tell us (EBITDA, owner comp, your price).
+_ESSENTIAL_INPUTS = [
+    # (canonical key, label, is_currency)
+    ("aum", "AUM ($)", True),
+    ("revenue", "Annual Revenue ($)", True),
+    ("num_clients", "Number of Clients", False),
+    ("ebitda", "EBITDA ($)", True),
+    ("owner_comp", "Owner's Compensation ($)", True),
+    ("purchase_price", "Purchase Price ($)", True),
+]
+_essential_current = {
+    "aum": aum, "revenue": annual_revenue, "num_clients": num_clients,
+    "ebitda": ebitda, "owner_comp": owner_comp, "purchase_price": purchase_price,
+}
+_missing_essentials = [
+    (k, label, is_cur) for k, label, is_cur in _ESSENTIAL_INPUTS
+    if _essential_current[k] == 0
+]
+if _missing_essentials:
+    _n_miss = len(_missing_essentials)
+    _has_any = any(v > 0 for v in _essential_current.values())
+    with st.container(border=True):
+        if _has_any:
+            st.markdown(
+                f"**Almost there — {_n_miss} more "
+                f"input{'s' if _n_miss != 1 else ''} to complete the picture.** "
+                "SEC filings don't report these; enter what you know and the "
+                "analysis fills in live."
+            )
+        else:
+            st.markdown(
+                "**Set up your deal.** Search a firm by name in the sidebar to "
+                "auto-fill from SEC records, or enter the essentials here."
+            )
+        with st.form("setup_prompts_form", border=False):
+            _cols = st.columns(min(3, _n_miss))
+            for _i, (_k, _label, _is_cur) in enumerate(_missing_essentials):
+                with _cols[_i % len(_cols)]:
+                    st.text_input(_label, key=f"_prompt_{_k}",
+                                  placeholder="e.g. 1,600,000" if _is_cur else "e.g. 200")
+            if st.form_submit_button("Apply", type="primary"):
+                _applied_any = False
+                for _k, _label, _is_cur in _missing_essentials:
+                    _raw = str(st.session_state.get(f"_prompt_{_k}", "")).strip()
+                    if not _raw:
+                        continue
+                    try:
+                        _val = int(float(_raw.replace(",", "").replace("$", "")))
+                    except (ValueError, TypeError):
+                        st.error(f"Couldn't read {_label}: {_raw}")
+                        continue
+                    _queue_apply(_k, f"{_val:,}")
+                    _applied_any = True
+                if _applied_any:
+                    st.rerun()
+
 tab_summary, tab_financials, tab_returns, tab_integration, tab_memo = st.tabs([
     "Deal Summary", "Financials", "Returns & Stress", "Integration", "Deal Memo",
 ])
@@ -2238,9 +2302,8 @@ with tab_summary:
     if aum == 0 and annual_revenue == 0 and ebitda == 0:
         st.info(
             "**Get started.** Search for a firm by name in the sidebar to "
-            "auto-fill from SEC Form ADV, or open the **Target Firm** "
-            "section in the sidebar and enter values manually. The "
-            "calculator updates live as you type."
+            "auto-fill from SEC Form ADV, or fill in the essentials in the "
+            "card above. The calculator updates live as you type."
         )
 
     # ---- Valuation Band (banker-MD memo, Part B) ----

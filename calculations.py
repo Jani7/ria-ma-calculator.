@@ -785,39 +785,77 @@ def lookup_comps_band(
     aum: float,
     pct_recurring: float,
     comps_df: pd.DataFrame,
+    include_estimated: bool = False,
 ) -> dict:
     """Return P25 / median / P75 of EV/EBITDA and EV/Revenue for the
     relevant AUM x recurring slice. Falls back to a wider AUM band if the
     primary slice has <5 deals; returns None for either multiple when the
     slice is too thin to be meaningful.
 
+    By default only confirmed rows (is_estimated == False) feed the band —
+    rows whose multiples are modeled guesses stay out unless the caller
+    passes include_estimated=True. A frame without an is_estimated column
+    is a legacy CSV, so every row counts as confirmed; a blank/NaN flag is
+    unknown provenance and counts as estimated. All slicing, the adjacent-
+    tier fallback, and the <5-deals thinness check run against the
+    filtered frame, so a confirmed-only lookup that comes up thin returns
+    None bands rather than quietly re-admitting estimates.
+
     Returns a dict with keys:
         aum_tier, recurring_tier: the chosen slice labels
         n_primary: deals in the primary AUM x recurring slice
         n_used: deals used to compute the band after any fallback
+        n_confirmed: confirmed (non-estimated) rows in the full input frame
+        n_estimated_excluded: rows dropped by the estimate filter
+            (0 when include_estimated=True)
         fallback: True if we widened the slice
         ev_ebitda: dict of {p25, median, p75} or None if too thin
         ev_revenue: dict of {p25, median, p75} or None if too thin
         slice_df: the DataFrame rows used (for downstream UI)
     """
-    if comps_df is None or len(comps_df) == 0:
-        return {
-            "aum_tier": _aum_tier_for(aum),
-            "recurring_tier": _recurring_tier_for(pct_recurring),
-            "n_primary": 0,
-            "n_used": 0,
-            "fallback": False,
-            "ev_ebitda": None,
-            "ev_revenue": None,
-            "slice_df": comps_df,
-        }
+    def _is_est(v) -> bool:
+        # Hand-edited CSVs can hold strings ("TRUE"/"False"); NaN means
+        # unknown provenance, which conservatively counts as estimated.
+        if isinstance(v, str):
+            return v.strip().lower() != "false"
+        if pd.isna(v):
+            return True
+        return bool(v)
+
+    n_total = 0 if comps_df is None else len(comps_df)
+    if n_total > 0 and "is_estimated" in comps_df.columns:
+        confirmed_mask = ~comps_df["is_estimated"].map(_is_est)
+        n_confirmed = int(confirmed_mask.sum())
+    else:
+        confirmed_mask = None
+        n_confirmed = n_total  # legacy frame: treat every row as confirmed
+
+    working = comps_df
+    n_estimated_excluded = 0
+    if not include_estimated and confirmed_mask is not None:
+        working = comps_df[confirmed_mask]
+        n_estimated_excluded = n_total - n_confirmed
 
     aum_tier = _aum_tier_for(aum)
     rec_tier = _recurring_tier_for(pct_recurring)
 
-    primary = comps_df[
-        (comps_df["aum_tier"] == aum_tier)
-        & (comps_df["recurring_tier"] == rec_tier)
+    if working is None or len(working) == 0:
+        return {
+            "aum_tier": aum_tier,
+            "recurring_tier": rec_tier,
+            "n_primary": 0,
+            "n_used": 0,
+            "n_confirmed": n_confirmed,
+            "n_estimated_excluded": n_estimated_excluded,
+            "fallback": False,
+            "ev_ebitda": None,
+            "ev_revenue": None,
+            "slice_df": working,
+        }
+
+    primary = working[
+        (working["aum_tier"] == aum_tier)
+        & (working["recurring_tier"] == rec_tier)
     ]
     n_primary = len(primary)
 
@@ -825,15 +863,15 @@ def lookup_comps_band(
     fallback = False
     if n_primary < 5:
         widened_tiers = [aum_tier] + _ADJACENT_AUM_TIERS.get(aum_tier, [])
-        widened = comps_df[
-            (comps_df["aum_tier"].isin(widened_tiers))
-            & (comps_df["recurring_tier"] == rec_tier)
+        widened = working[
+            (working["aum_tier"].isin(widened_tiers))
+            & (working["recurring_tier"] == rec_tier)
         ]
         if len(widened) >= 5:
             used = widened
             fallback = True
         else:
-            widened2 = comps_df[comps_df["aum_tier"].isin(widened_tiers)]
+            widened2 = working[working["aum_tier"].isin(widened_tiers)]
             if len(widened2) >= 5:
                 used = widened2
                 fallback = True
@@ -858,6 +896,8 @@ def lookup_comps_band(
         "recurring_tier": rec_tier,
         "n_primary": n_primary,
         "n_used": len(used),
+        "n_confirmed": n_confirmed,
+        "n_estimated_excluded": n_estimated_excluded,
         "fallback": fallback,
         "ev_ebitda": ev_ebitda,
         "ev_revenue": ev_revenue,

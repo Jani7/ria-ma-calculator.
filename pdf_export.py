@@ -204,7 +204,7 @@ from memo_mode import (  # noqa: E402  (kept with the memo section it serves)
     build_memo_data, is_zero_state, pdf_safe,
     fmt_money, fmt_money_table, fmt_mult, fmt_dscr, fmt_irr,
     _sev, _plain, _breakeven_parts,
-    APP_URL as MEMO_APP_URL, MEMO_DISCLAIMER,
+    APP_URL as MEMO_APP_URL, MEMO_DISCLAIMER, _comps_table_caption,
 )
 
 _M_ACCENT = (124, 140, 255)
@@ -761,12 +761,7 @@ def generate_memo_pdf(ctx, extras):
         # A printed page 5 circulates without anyone here to explain it: real
         # buyer/seller names sitting beside a modeled multiple need the legend
         # spelled out, not compressed into a four-character tag.
-        _m_caption(pdf, "Est. = modeled estimate; the multiple was not "
-                        "disclosed by the parties. Confirmed = flagged as "
-                        "sourced: rows shipped with this tool cite a primary "
-                        "source, rows added by the preparer are their own "
-                        "attestation. The benchmark above uses confirmed "
-                        "rows only.")
+        _m_caption(pdf, _comps_table_caption(c))
     elif not c["available"]:
         _m_caption(pdf, "No comparable-transactions database is available in "
                         "this deployment.")

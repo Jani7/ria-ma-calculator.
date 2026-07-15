@@ -392,6 +392,11 @@ def test_irr_garbage_guard():
         ok(f"IRR {junk:.3g} copy refuses to quote the number",
            "not meaningful" in ins.text and "clears" not in ins.text,
            ins.text)
+        # The copy must not assert a CAUSE we never tested. irr_is_meaningful
+        # inspects a value, not the cash-flow shape; claiming "cash flows never
+        # turn positive" was false in ~15% of reachable deals.
+        ok(f"IRR {junk:.3g} copy claims no untested cause",
+           "never turn positive" not in ins.text, ins.text)
     # A sane IRR must still be scored normally.
     sane = _insight_returns({"returns": {"irr_yr5": 0.557}})
     ok("sane IRR 55.7% still clears", sane.severity == "positive")

@@ -3248,12 +3248,22 @@ with tab_integration:
 # ==============================================================================
 with tab_memo:
     # Display-only frame for the page-5 table: estimated deals still LIST
-    # (flagged Est.) but never feed the band.
-    _memo_comps_table = (
+    # (flagged Est.) but never feed the band. This lookup is estimate-inclusive
+    # AND may tier-widen, so it is a DIFFERENT population from the confirmed-only
+    # band above — carry its provenance through so page 5's caption can say so
+    # instead of letting a widened "Confirmed" row sit under an "N=0" headline.
+    _memo_comps_lookup = (
         lookup_comps_band(aum, pct_recurring, _comps_df_active,
-                          include_estimated=True).get("slice_df")
+                          include_estimated=True)
         if len(_comps_df_active) > 0 else None
     )
+    _memo_comps_table = (
+        _memo_comps_lookup.get("slice_df") if _memo_comps_lookup else None
+    )
+    _memo_comps_meta = {
+        "aum_tier": _memo_comps_lookup.get("aum_tier") if _memo_comps_lookup else None,
+        "fallback": bool(_memo_comps_lookup.get("fallback")) if _memo_comps_lookup else False,
+    }
     _memo_ctx = dict(_insight_ctx)
     # Override the shared (toggle-honoring) band with the confirmed-only one.
     # _insight_ctx carries _comps_band so Tab 1 and the insight strip agree
@@ -3278,6 +3288,7 @@ with tab_memo:
             earnout=pct_earnout, rollover=pct_equity_rollover,
         ),
         comps_table_df=_memo_comps_table,
+        comps_table_meta=_memo_comps_meta,
     )
     render_memo_tab(_memo_ctx, _memo_extras)
 

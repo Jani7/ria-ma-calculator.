@@ -307,7 +307,7 @@ def _insight_returns(ctx: dict) -> Optional[Insight]:
             return _mk("returns", "info",
                        ["Returns undefined — no buyer equity invested."], data)
         return _mk("returns", "negative",
-                   ["IRR not meaningful — cash flows never turn positive."],
+                   ["IRR not meaningful at these terms."],
                    data, sub=sub)
     # The engine's Newton solver returns garbage (|IRR| ~1e10+) when the cash
     # flows never change sign — i.e. the deal never pays back. Unguarded, that
@@ -317,7 +317,7 @@ def _insight_returns(ctx: dict) -> Optional[Insight]:
     # use (_irr_clears); a non-finite IRR is a red flag, never a green one.
     if not (-0.99 < irr < IRR_SANITY_CAP):
         return _mk("returns", "negative",
-                   ["IRR not meaningful — cash flows never turn positive."],
+                   ["IRR not meaningful at these terms."],
                    data, sub=sub)
     if irr >= HURDLE_HIGH:
         sev, verb = "positive", " clears typical sponsor hurdles."

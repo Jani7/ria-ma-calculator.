@@ -32,6 +32,7 @@ from persistence import (  # noqa: E402
     encode_deal_to_param,
     get_share_url,
     restore_deal_state,
+    _MAX_ABS_VALUE as MAX_ABS_VALUE,
 )
 
 
@@ -268,9 +269,16 @@ def test_non_finite_payload_is_refused():
     # only the spellings the fix implements is how "nan" got through the first
     # fix for the literal NaN.
     payloads = [
+        # non-finite, every spelling
         "nan", "NaN", "NAN", "  nan  ", "-nan", "inf", "-inf", "+inf",
         "Infinity", "1e999", "1e309", 10 ** 4000, -(10 ** 4000),
         float("nan"), float("inf"), float("-inf"),
+        # finite but astronomical — isfinite() says yes, Streamlit's number
+        # widgets say StreamlitJSNumberBoundsError. Round 1 fixed the literal
+        # NaN, round 2 found the string "nan", round 3 found THIS walking
+        # through the same door. Same door, third spelling.
+        1e308, -1e308, 1e300, 1e16, 2 ** 53 + 1, "1e308",
+        "999999999999999999999",
     ]
     for key in DEAL_STATE_KEYS:
         for payload in payloads:
@@ -282,12 +290,15 @@ def test_non_finite_payload_is_refused():
                     f"restore raised {type(exc).__name__} for {key}={payload!r:.20}"
                 ) from exc
             for qk, qv in q.items():
-                if isinstance(qv, float):
-                    assert math.isfinite(qv), f"{key}={payload!r:.20} queued {qk}={qv}"
-                elif isinstance(qv, str):
-                    assert qv.strip().lower().lstrip("+-") not in (
-                        "nan", "inf", "infinity"
-                    ), f"{key}={payload!r:.20} queued {qk}={qv!r}"
+                num = qv
+                if isinstance(qv, str):
+                    try:
+                        num = float(qv.replace(",", ""))
+                    except ValueError:
+                        continue  # a legitimate non-numeric (enum) value
+                if isinstance(num, (int, float)) and not isinstance(num, bool):
+                    assert math.isfinite(num),                         f"{key}={payload!r:.20} queued non-finite {qk}={qv!r}"
+                    assert abs(num) <= MAX_ABS_VALUE,                         f"{key}={payload!r:.20} queued out-of-bounds {qk}={qv!r}"
 
     # Legitimate restores must be completely unaffected by all of the above.
     queued = {}
@@ -301,6 +312,15 @@ def test_non_finite_payload_is_refused():
     assert queued.get("attrition_rate") == 5.0, queued
     assert queued.get("loan_term") == 7, queued
     assert applied == 3, applied
+
+    # The ceiling must not reject legitimate scale: the largest RIAs on the ADV
+    # file manage single-digit trillions. A guard that blocks real deals to stop
+    # fake ones is not a guard, it is a bug.
+    queued = {}
+    restore_deal_state({"aum": 3_000_000_000_000, "revenue": 22_500_000_000},
+                       queued.__setitem__)
+    assert queued.get("aum") == "3,000,000,000,000", queued
+    assert queued.get("revenue") == "22,500,000,000", queued
 
 
 def test_sqlite_store_crud():

@@ -55,6 +55,14 @@ SCHEMA_VERSION = 1
 # Dev-only SQLite location (gitignored; ephemeral on Streamlit Cloud).
 _SQLITE_DEFAULT_PATH = Path(__file__).parent / "data" / "deals.db"
 
+# Hard ceiling for ANY restored number, applied at the _to_number chokepoint.
+# 1e15 sits just under JS's safe-integer limit (2^53 ~ 9.007e15), beyond which
+# Streamlit's number widgets raise StreamlitJSNumberBoundsError on render — and
+# comfortably above any real input here: the largest RIA on the ADV file manages
+# single-digit trillions ($1e13), so a legitimate deal never comes close.
+# Untrusted share links do; this is what stops them.
+_MAX_ABS_VALUE = 1e15
+
 
 # ==============================================================================
 # DEAL-STATE MANIFEST — the single source of truth
@@ -231,6 +239,17 @@ def _to_number(raw) -> float:
         raise TypeError(f"not a number: {type(raw).__name__}")
     if not math.isfinite(v):
         raise ValueError(f"non-finite number: {raw!r}")
+    # Finite is not the same as sane. 1e308 sails past the isfinite guard, and
+    # the currency/count branch never clamps (no _NUMERIC_RANGES entry), so a
+    # 62-char share link carrying {"int_expense_base": 1e308} reached the widget
+    # and raised StreamlitJSNumberBoundsError in the recipient's face. Same door,
+    # third spelling: the JSON literal NaN, then the string "nan", now
+    # finite-but-astronomical. Nothing in an RIA deal legitimately exceeds this
+    # bound — AUM is measured in billions, not decillions — and values beyond
+    # JS's safe-integer range (2^53) cannot survive the browser round-trip
+    # regardless. Reject at the chokepoint every numeric key already crosses.
+    if abs(v) > _MAX_ABS_VALUE:
+        raise ValueError(f"implausible magnitude: {raw!r}")
     return v
 
 

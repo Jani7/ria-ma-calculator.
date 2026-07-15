@@ -483,9 +483,32 @@ def _comps_digest(ctx, extras, deal_mult, comps_ins):
         # construction, so the frame-level confirmed count is safe to trust.
         out["n_confirmed"] = out["n_used"]
 
+    # The table and the band describe DIFFERENT populations, and page 5 has to
+    # say so out loud. The table is estimate-inclusive and tier-widened (at
+    # $3B/80% it pulls 31 rows from adjacent tiers); the band is confirmed-only
+    # in the target's own slice (0 rows). Rendered without disclosure, page 5
+    # said "Insufficient confirmed comparables - N=0", then listed a row
+    # stamped "Confirmed", then claimed "the benchmark above uses confirmed
+    # rows only" — three statements that cannot all be true, using one word for
+    # two populations. Carry the table's own provenance so the caption can
+    # reconcile them.
+    table_meta = (extras or {}).get("comps_table_meta") or {}
+    out["table_tier"] = table_meta.get("aum_tier")
+    out["table_widened"] = bool(table_meta.get("fallback"))
+
     table_df = (extras or {}).get("comps_table_df")
     if table_df is None:
         table_df = slice_df
+    if table_df is not None and len(table_df) > 0:
+        out["table_n"] = int(len(table_df))
+        out["table_n_est"] = sum(
+            1 if _row_is_estimated(r.to_dict()) else 0
+            for _, r in table_df.iterrows()
+        )
+        out["table_n_conf"] = out["table_n"] - out["table_n_est"]
+    else:
+        out["table_n"] = out["table_n_est"] = out["table_n_conf"] = 0
+
     rows = []
     if table_df is not None and len(table_df) > 0:
         sdf = table_df.sort_values("date", ascending=False).head(10)
@@ -556,10 +579,13 @@ def _exec_paragraph(d, ctx):
     # Sentence 3 -- returns and breakeven.
     irr5 = d["ret"]["irr5"]
     if irr5 is None and d["ret"].get("irr5_broken"):
-        parts.append(
-            "Five-year IRR is not meaningful at these terms — the cash flows "
-            "never turn positive."
-        )
+        # State the fact, not a cause we did not test. irr5_broken means the
+        # solver returned a value outside any plausible range; it does NOT mean
+        # the cash flows never turn positive. Asserting that was false in ~15%
+        # of reachable deals — a deal returning 34x in year one was described
+        # to a committee as never turning positive. Diagnose the shape, or say
+        # nothing about it.
+        parts.append("Five-year IRR is not meaningful at these terms.")
     elif irr5 is None:
         parts.append("Buyer equity is zero at these terms, so IRR is undefined.")
     else:
@@ -712,6 +738,43 @@ def _risk_bullets(d, ctx):
             break
         bullets.append(standing)
     return bullets
+
+
+def _comps_table_caption(c) -> str:
+    """One sentence reconciling the table with the band above it.
+
+    The table is estimate-inclusive and may be tier-widened; the band is
+    confirmed-only in the target's own slice. Page 5 previously implied they
+    were the same population, so a widened "Confirmed" row appeared directly
+    under a "N=0 confirmed" headline. Say what the table IS, then say what the
+    band used — in that order, on the page where both are visible.
+    """
+    where = "in this AUM tier"
+    if c.get("table_widened"):
+        where = "from this and adjacent AUM tiers"
+    bits = [f"Table lists {c['table_n']} transaction"
+            f"{'s' if c['table_n'] != 1 else ''} {where}"]
+    if c.get("table_n_est"):
+        bits.append(
+            f"{c['table_n_est']} of them modelled estimates (Est.), shown for "
+            f"context and excluded from any benchmark"
+        )
+    if c.get("band_ok"):
+        bits.append(
+            f"the band above is computed from {c['n_confirmed']} confirmed "
+            f"deal{'s' if c['n_confirmed'] != 1 else ''} in the target's own slice"
+        )
+    else:
+        bits.append(
+            "the band above is withheld: the target's own slice holds "
+            f"{c['n_confirmed']} confirmed deal"
+            f"{'s' if c['n_confirmed'] != 1 else ''}, too few to compute one"
+        )
+    return "; ".join(bits) + (
+        ". Est. = the multiple was not disclosed by the parties. Confirmed = "
+        "flagged as sourced: rows shipped with this tool cite a primary "
+        "source, rows added by the preparer are their own attestation."
+    )
 
 
 def _synergy_digest(ctx):
@@ -1296,13 +1359,7 @@ def _page5_html(d):
                 f'<td class="{src_cls}">{src_txt}</td></tr>'
             )
         p.append('</tbody></table>')
-        p.append(
-            '<div class="memo-caption">Est. = modeled estimate; the multiple '
-            'was not disclosed by the parties. Confirmed = flagged as sourced: '
-            'rows shipped with this tool cite a primary source, rows added by '
-            'the preparer are their own attestation. The benchmark above uses '
-            'confirmed rows only.</div>'
-        )
+        p.append(f'<div class="memo-caption">{_h(_comps_table_caption(c))}</div>')
     elif not c["available"]:
         p.append(
             '<div class="memo-caption">No comparable-transactions database is '

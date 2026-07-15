@@ -20,6 +20,7 @@ builder from here, and keeping this module UI-free keeps that clean.
 import html as _html
 import math
 import re
+from dataclasses import replace
 from datetime import date
 
 try:
@@ -73,6 +74,8 @@ MEMO_CSS = """
 .memo-h::before{content:"";width:3px;height:14px;background:#7c8cff;border-radius:2px;}
 .memo-para{font-size:0.92rem;line-height:1.65;color:#c5cad6;margin:14px 0;max-width:62ch;}
 .memo-caption{font-size:0.78rem;line-height:1.55;color:#8b94a8;margin:8px 0 0 0;}
+.memo-disclaimer{font-size:0.72rem;line-height:1.5;color:#6b7385;margin:18px 0 0 0;
+  padding:10px 12px;border:1px solid #1c2230;border-radius:6px;}
 .memo-verdict{
   display:flex;align-items:center;gap:12px;background:#0e1118;
   border:1px solid #1c2230;border-left:3px solid #6b7385;border-radius:6px;
@@ -81,14 +84,17 @@ MEMO_CSS = """
 .memo-verdict--go{border-left-color:#4ade80;}
 .memo-verdict--caution{border-left-color:#fbbf24;}
 .memo-verdict--reconsider{border-left-color:#f87171;}
+.memo-verdict--incomplete{border-left-color:#6b7385;}
 .memo-verdict-dot{width:10px;height:10px;border-radius:50%;flex:0 0 10px;background:#6b7385;}
 .memo-verdict--go .memo-verdict-dot{background:#4ade80;}
 .memo-verdict--caution .memo-verdict-dot{background:#fbbf24;}
 .memo-verdict--reconsider .memo-verdict-dot{background:#f87171;}
+.memo-verdict--incomplete .memo-verdict-dot{background:#6b7385;}
 .memo-verdict-word{font-size:1.05rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#ffffff;}
 .memo-verdict--go .memo-verdict-word{color:#4ade80;}
 .memo-verdict--caution .memo-verdict-word{color:#fbbf24;}
 .memo-verdict--reconsider .memo-verdict-word{color:#f87171;}
+.memo-verdict--incomplete .memo-verdict-word{color:#8b94a8;}
 .memo-verdict-counts{
   margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,'SF Mono',Consolas,Menlo,monospace;
   font-size:0.74rem;color:#8b94a8;font-feature-settings:"tnum","lnum";
@@ -286,20 +292,26 @@ def _h(text):
     return _html.escape(str(text), quote=False).replace("$", "&#36;")
 
 
-_ASCII_MAP = {
-    "×": "x", "—": "--", "–": "-", "−": "-",
-    "·": "-", "≈": "~", "≤": "<=", "≥": ">=",
-    "→": "->", "‘": "'", "’": "'", "“": '"',
-    "”": '"', "…": "...", " ": " ",
+# fpdf2's core fonts are latin-1, NOT ascii -- U+00D7 (×) and U+00B7 (·)
+# encode natively, so folding them was self-inflicted damage: every multiple in
+# the hero PDF printed "8.0x" and every dot separator became a hyphen. Fold only
+# what latin-1 genuinely cannot carry (verified against the codec, not assumed).
+_LATIN1_MAP = {
+    "—": "--", "–": "-", "−": "-", "≈": "~",
+    "≤": "<=", "≥": ">=", "→": "->",
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "…": "...",
 }
 
 
 def pdf_safe(text):
-    """Force memo copy down to plain ASCII for fpdf2 core fonts."""
+    """Force memo copy down to latin-1, the widest set fpdf2 core fonts print."""
     s = str(text)
-    for k, v in _ASCII_MAP.items():
+    for k, v in _LATIN1_MAP.items():
         s = s.replace(k, v)
-    return s.encode("ascii", "ignore").decode("ascii")
+    # Anything still outside latin-1 is a copy bug upstream; drop it rather than
+    # raise mid-render, but keep every glyph the font can actually set.
+    return s.encode("latin-1", "ignore").decode("latin-1")
 
 
 def _sev(ins):
@@ -453,13 +465,22 @@ def _comps_digest(ctx, extras, deal_mult, comps_ins):
     out["fallback"] = bool(comps.get("fallback"))
 
     slice_df = comps.get("slice_df")
-    if "n_confirmed" in comps:
-        out["n_confirmed"] = out["n_used"]
-    elif slice_df is not None and len(slice_df) > 0:
+    # Always count confirmed rows from the slice the band was actually built
+    # from. The old shortcut (n_confirmed = n_used whenever the key existed)
+    # silently held only when estimates were excluded: with the editor's
+    # include-estimates toggle ON, lookup_comps_band returns n_used=17 /
+    # n_confirmed=4 (a whole-FRAME count), so the memo reported 17 confirmed,
+    # set band_ok, drew a band from mostly-synthesized rows, and rendered
+    # "no reliable band" directly beneath it. Provenance is per-row; count it.
+    if slice_df is not None and len(slice_df) > 0:
         out["n_confirmed"] = sum(
             0 if _row_is_estimated(r.to_dict()) else 1
             for _, r in slice_df.iterrows()
         )
+    elif "n_confirmed" in comps and not comps.get("includes_estimated"):
+        # No slice frame to inspect, but the band excluded estimates by
+        # construction, so the frame-level confirmed count is safe to trust.
+        out["n_confirmed"] = out["n_used"]
 
     table_df = (extras or {}).get("comps_table_df")
     if table_df is None:
@@ -621,13 +642,21 @@ def _risk_bullets(d, ctx):
             f"Buyer capabilities cover {cf*100:.0f}% of modeled synergies "
             f"— who actually does the integration work?"
         )
-    # 5 -- thin comps
-    if d["comps"]["available"] and (d["comps"]["fallback"] or d["comps"]["n_used"] < 5):
-        where = "after widening tiers" if d["comps"]["fallback"] else "in this slice"
-        bullets.append(
-            f"Comp band rests on {d['comps']['n_used']} deals {where} "
-            f"— validate against a broker quote."
-        )
+    # 5 -- thin comps. Two distinct states: a band exists but is thin, or no
+    # band was drawn at all. Saying "rests on 0 deals" in the second case
+    # contradicted page 5, which correctly withholds the band entirely.
+    if d["comps"]["available"]:
+        if not d["comps"]["band_ok"]:
+            bullets.append(
+                "No confirmed comps in this slice — the band is withheld; "
+                "source a broker quote before pricing."
+            )
+        elif d["comps"]["fallback"] or d["comps"]["n_used"] < 5:
+            where = "after widening tiers" if d["comps"]["fallback"] else "in this slice"
+            bullets.append(
+                f"Comp band rests on {d['comps']['n_used']} deals {where} "
+                f"— validate against a broker quote."
+            )
     # 6 -- mega-RIA
     if d["aum"] > 10e9:
         bullets.append(
@@ -645,9 +674,16 @@ def _risk_bullets(d, ctx):
             f"{earnout*100:.0f}% of consideration is earnout — will the seller "
             f"accept this much at-risk?"
         )
-    # 9 -- thin recurring
+    # 9 -- thin recurring. rec == 0 is the untouched default, not a real
+    # answer: it drives the band's recurring factor to its floor and quietly
+    # understates the valuation. Call that out rather than skipping it.
     rec = float(inp.get("pct_recurring") or 0)
-    if 0 < rec < 70:
+    if rec <= 0:
+        bullets.append(
+            "% recurring revenue is not set — the valuation band assumes the "
+            "least favourable case and is understated until you enter it."
+        )
+    elif rec < 70:
         bullets.append(
             f"Only {rec:.0f}% recurring revenue — how durable is the "
             f"non-recurring book?"
@@ -824,7 +860,15 @@ def build_memo_data(ctx, extras):
         "verdict_word": verdict.upper(),
         "verdict_raw": verdict_raw, "counts_raw": counts_raw,
         "counts": (neg, cau, pos),
-        "counts_line": f"{neg} flags · {cau} caution · {pos} clear",
+        # Name the arithmetic: an unqualified verdict word on page 1 of a
+        # forwardable memo is advice-shaped. "N of 6 checks scored" says out
+        # loud that this is a model screen, not a recommendation.
+        "counts_line": (
+            "enter EBITDA and a bid to underwrite"
+            if verdict_raw == "INCOMPLETE"
+            else f"{neg} flags · {cau} caution · {pos} clear "
+                 f"· {neg + cau + pos} of 6 checks scored"
+        ),
         "insights": insights, "ins": ins,
         "stats_target": [
             ("AUM", fmt_money(aum)),
@@ -843,10 +887,15 @@ def build_memo_data(ctx, extras):
         "pf_rows": pf_rows,
         "ret": ret,
         "stat_dots": stat_dots,
+        # The returns insight already carries the "typical sponsor hurdles"
+        # hedge in its text; this caption supplies the number and the exit
+        # assumption without repeating the phrase. (It used to say it a third
+        # time in three consecutive lines — five reviewers flagged it as
+        # machine-generated boilerplate in a document meant to be forwarded.)
         "hurdle_caption": (
-            f"Hurdle reference: typical sponsor hurdles run ~18–22%. "
-            f"Exit assumes {fmt_mult(ret['exit_mult'])} EBITDA at the "
-            f"recurring-revenue level entered."
+            f"Hurdle reference: ~18–22% five-year IRR — directional, not a "
+            f"market quote. Exit assumes {fmt_mult(ret['exit_mult'])} EBITDA "
+            f"at the recurring-revenue level entered."
         ),
         "syn": _synergy_digest(ctx),
         "comps": _comps_digest(ctx, extras, deal_mult,
@@ -860,10 +909,26 @@ def build_memo_data(ctx, extras):
 # ==============================================================================
 # HTML renderers (screen)
 # ==============================================================================
+APP_URL = "ria-ma-calc.streamlit.app"
+
+# Shown once, on the last page. The memo is built to be printed and forwarded,
+# so it has to defend itself in a room nobody from here is standing in: every
+# number traces to user inputs and unverified public-data estimates, and the
+# verdict word is flag arithmetic, not a recommendation.
+MEMO_DISCLAIMER = (
+    "All figures derive solely from the inputs entered and from estimates "
+    "built on unverified public data. This memo is a modeling aid — not a "
+    "valuation opinion, fairness opinion, or investment, legal, or tax "
+    "advice. The GO / CAUTION / RECONSIDER verdict is a model output "
+    "computed from the checks listed above, not a recommendation to "
+    "transact. Verify every input independently before relying on it."
+)
+
+
 def _footer_html(n):
     return (
         '<div class="memo-footer">'
-        '<span>Prepared with RIA M&amp;A Calculator — not investment advice</span>'
+        f'<span>Prepared with RIA M&amp;A Calculator — {APP_URL}</span>'
         f'<span>Page {n} of 5</span></div>'
     )
 
@@ -897,10 +962,17 @@ def _stat_tile(label, value, dot_sev=None):
     )
 
 
-def _insight_html(ins):
-    """Render an insight via insights.render_insight, with a quiet fallback."""
+def _insight_html(ins, drop_sub=False):
+    """Render an insight via insights.render_insight, with a quiet fallback.
+
+    drop_sub suppresses the hedge sub-label for strips whose page already
+    states the same reference in a caption (see the returns strip on page 3);
+    the calculator keeps the sub, since it has no caption to lean on."""
     if ins is None:
         return ""
+    if drop_sub and isinstance(getattr(ins, "data", None), dict) and ins.data.get("sub_html"):
+        ins = replace(ins, data={k: v for k, v in ins.data.items()
+                                 if k not in ("sub_html", "sub")})
     try:
         out = render_insight(ins)
         if isinstance(out, str) and out.strip():
@@ -1125,7 +1197,8 @@ def _page3_html(d):
     p.append(_stat_tile("Breakeven", be_disp, dots["be"]))
     p.append(_stat_tile("Lowest DSCR", dscr_val, dots["dscr"]))
     p.append('</div>')
-    p.append(_insight_html(d["ins"]["returns"]))
+    # drop_sub: the hurdle caption below states the ~18-22% reference already.
+    p.append(_insight_html(d["ins"]["returns"], drop_sub=True))
     p.append(_insight_html(d["ins"]["dscr"]))
     p.append(f'<div class="memo-caption">{_h(d["hurdle_caption"])}</div>')
     p.append(_footer_html(3))
@@ -1199,11 +1272,18 @@ def _page5_html(d):
                 f'<td class="{src_cls}">{src_txt}</td></tr>'
             )
         p.append('</tbody></table>')
+        p.append(
+            '<div class="memo-caption">Est. = modeled estimate; the multiple '
+            'was not disclosed by the parties and is excluded from the '
+            'benchmark above. Confirmed = multiple stated in, or derived '
+            'from, a cited primary source.</div>'
+        )
     elif not c["available"]:
         p.append(
             '<div class="memo-caption">No comparable-transactions database is '
             'available in this deployment.</div>'
         )
+    p.append(f'<div class="memo-disclaimer">{_h(MEMO_DISCLAIMER)}</div>')
     p.append(_footer_html(5))
     p.append('</div>')
     return "".join(p)

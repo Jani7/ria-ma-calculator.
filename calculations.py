@@ -148,10 +148,14 @@ def compute_valuation_band(
     """Multi-factor EBITDA-multiple valuation band.
 
     Replaces the user-enters-price-then-computes-multiples workflow with
-    a defensible band the buyer can stress-test. Base multiple is the
-    2025-26 market median for $250M-$1B AUM RIA transactions (Echelon
-    Q1 2026 deal book ≈ 8.1× adjusted EBITDA — we anchor slightly lower
-    at 7.0× and let the multipliers earn their way up).
+    a band the buyer can stress-test.
+
+    The 7.0× base is a MODEL ANCHOR, not a sourced market statistic. An
+    earlier version of this docstring attributed it to an "Echelon Q1 2026
+    deal book ≈ 8.1× adjusted EBITDA" — that citation could not be verified
+    and has been removed rather than dressed up. Treat 7.0× as a starting
+    assumption the user is expected to challenge; see data/SOURCES.md for
+    the transactions this project can actually stand behind.
 
     Returns:
         dict with low / mid / high dollar values, the implied EBITDA

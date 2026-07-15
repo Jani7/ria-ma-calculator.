@@ -91,6 +91,12 @@ CAPTURE_GRID = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
 # clearing the hurdle.
 IRR_SANITY_CAP = 10.0
 
+# A bid this far under the band's low end stops reading as a bargain and starts
+# reading as a question about whether the seller transacts at all. 0.85 is a
+# judgement call, not a market statistic — it exists so the model shows some
+# skepticism rather than stamping GO on an implausible steal.
+DEEP_DISCOUNT_FRACTION = 0.85
+
 # Insight kinds that are meaningless without a bid. Per spec section 2.4 the
 # calculator renders them only when purchase_price > 0; compute still emits
 # their info states (flagged data["gated"]=True) so the memo layer can reason
@@ -232,6 +238,15 @@ def _insight_valuation(ctx: dict) -> Optional[Insight]:
     if bid <= 0:
         return _mk("valuation", "info",
                    ["Enter a bid to position it here."], data)
+    if bid < DEEP_DISCOUNT_FRACTION * low:
+        # A bid far under fair value is not a win — it's a question. Either the
+        # seller won't transact, or diligence hasn't surfaced why they would.
+        # Scoring this "positive" produced GO / zero flags on a 32%-under-band
+        # bid, which reads as naive to anyone who has run a process.
+        return _mk("valuation", "caution",
+                   ["Bid sits ", _num(_fmt_band_delta(low - bid)),
+                    " below the band — confirm seller expectations."],
+                   data, sub=band_sub)
     if bid < low:
         return _mk("valuation", "positive",
                    ["Bid sits ", _num(_fmt_band_delta(low - bid)), " below the band."],
@@ -260,11 +275,29 @@ def _insight_returns(ctx: dict) -> Optional[Insight]:
         return None
     # The hedge sub is always shown — this is the mandated market-claim hedge.
     sub = "typical sponsor hurdles ~18–22%"
-    irr = _f(ret.get("irr_yr5"))
+    raw = ret.get("irr_yr5")
+    irr = _f(raw)
     data = {"irr_yr5": irr, "hurdle_low": HURDLE_LOW, "hurdle_high": HURDLE_HIGH}
     if irr is None:
-        return _mk("returns", "info",
-                   ["Returns undefined — no buyer equity invested."], data)
+        # None means no IRR was computed (no buyer equity at risk). A present
+        # but non-finite value is a different animal: the solver diverged, so
+        # say so rather than implying the deal simply wasn't levered.
+        if raw is None:
+            return _mk("returns", "info",
+                       ["Returns undefined — no buyer equity invested."], data)
+        return _mk("returns", "negative",
+                   ["IRR not meaningful — cash flows never turn positive."],
+                   data, sub=sub)
+    # The engine's Newton solver returns garbage (|IRR| ~1e10+) when the cash
+    # flows never change sign — i.e. the deal never pays back. Unguarded, that
+    # rendered "IRR 1721053807567.8% clears typical sponsor hurdles" as a
+    # POSITIVE insight and softened the verdict from RECONSIDER to CAUTION on
+    # a deal that loses money every single year. Same clamp the stress scans
+    # use (_irr_clears); a non-finite IRR is a red flag, never a green one.
+    if not (-0.99 < irr < IRR_SANITY_CAP):
+        return _mk("returns", "negative",
+                   ["IRR not meaningful — cash flows never turn positive."],
+                   data, sub=sub)
     if irr >= HURDLE_HIGH:
         sev, verb = "positive", " clears typical sponsor hurdles."
     elif irr >= HURDLE_LOW:
@@ -576,13 +609,21 @@ def verdict_from_insights(insights: list) -> tuple:
     """Single source of truth for the memo verdict (spec page 1).
 
     negatives >= 2 -> RECONSIDER; negatives == 1 or cautions >= 2 -> CAUTION;
-    else GO. Info states count as nothing. An empty list yields ("GO", zeros)
-    — callers gate rendering on the zero-state before showing any verdict."""
+    else GO. Info states count as nothing.
+
+    Nothing scored -> INCOMPLETE, never GO. The old zero-state guard only fired
+    when AUM, revenue AND EBITDA were all blank, so the ordinary post-SEC-apply
+    state (AUM + revenue filled, EBITDA still 0) produced every insight as info
+    or None and stamped a green "GO - 0 flags, 0 caution, 0 clear" on a deal
+    nobody had underwritten yet. A verdict with no evidence behind it is the
+    most dangerous thing this module can render."""
     counts = {"negative": 0, "caution": 0, "positive": 0}
     for i in insights:
         if i.severity in counts:
             counts[i.severity] += 1
-    if counts["negative"] >= 2:
+    if sum(counts.values()) == 0:
+        verdict = "INCOMPLETE"
+    elif counts["negative"] >= 2:
         verdict = "RECONSIDER"
     elif counts["negative"] == 1 or counts["caution"] >= 2:
         verdict = "CAUTION"
@@ -651,23 +692,32 @@ def render_insight(insight: Insight, with_microviz: bool = False) -> str:
     return "".join(parts)
 
 
-_VERDICT_CLASS = {"GO": "go", "CAUTION": "caution", "RECONSIDER": "reconsider"}
+_VERDICT_CLASS = {"GO": "go", "CAUTION": "caution", "RECONSIDER": "reconsider",
+                  "INCOMPLETE": "incomplete"}
 
 
 def render_verdict_bar(verdict: str, counts: dict) -> str:
     """HTML for the memo page-1 verdict bar (.memo-verdict, spec page 1)."""
     v = str(verdict).upper()
     if v not in _VERDICT_CLASS:
-        raise ValueError(f"Unknown verdict {verdict!r}; expected GO, CAUTION or RECONSIDER")
+        raise ValueError(
+            f"Unknown verdict {verdict!r}; expected GO, CAUTION, RECONSIDER or INCOMPLETE")
     neg = int(counts.get("negative", 0))
     cau = int(counts.get("caution", 0))
     pos = int(counts.get("positive", 0))
+    if v == "INCOMPLETE":
+        # No checks scored — say what's missing instead of implying a judgement.
+        counts_txt = "enter EBITDA and a bid to underwrite"
+    else:
+        # Name it as flag arithmetic, not advice: this line is what proves the
+        # word on the left is a model screen rather than a recommendation.
+        counts_txt = (f'{neg} flags &#183; {cau} caution &#183; {pos} clear '
+                      f'&#183; {neg + cau + pos} of 6 checks scored')
     return (
         f'<div class="memo-verdict memo-verdict--{_VERDICT_CLASS[v]}">'
         '<span class="memo-verdict-dot"></span>'
         f'<span class="memo-verdict-word">{v}</span>'
-        f'<span class="memo-verdict-counts">{neg} flags &#183; {cau} caution '
-        f'&#183; {pos} clear</span>'
+        f'<span class="memo-verdict-counts">{counts_txt}</span>'
         "</div>"
     )
 

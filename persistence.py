@@ -23,6 +23,7 @@ and the injectable `session` / `queue_fn` parameters.
 
 import base64
 import json
+import logging
 import sqlite3
 import uuid
 import zlib
@@ -31,6 +32,11 @@ from abc import ABC, abstractmethod
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Operator visibility. Streamlit Cloud surfaces stderr in the app logs;
+# without this, Supabase outages, quota exhaustion and schema drift are
+# all silent. Never log PII (emails, deal economics) — message only.
+_log = logging.getLogger(__name__)
 
 try:
     import streamlit as st
@@ -306,7 +312,10 @@ def restore_deal_state(state: dict, queue_fn) -> int:
                     continue
             else:  # pragma: no cover — unreachable with a well-formed manifest
                 continue
-        except (TypeError, ValueError):
+        # ArithmeticError catches OverflowError: int(float("inf")) raises it,
+        # and a share link is untrusted input. One bad key skips that key
+        # rather than taking down the whole restore.
+        except (TypeError, ValueError, ArithmeticError):
             continue
 
         queue_fn(key, value)
@@ -333,6 +342,11 @@ def encode_deal_to_param(state: dict) -> str:
     return base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode("ascii").rstrip("=")
 
 
+def _reject_non_finite(literal):
+    """json.loads parse_constant hook — refuse Infinity/-Infinity/NaN."""
+    raise ValueError(f"non-finite JSON literal in payload: {literal}")
+
+
 def decode_deal_from_param(param) -> "dict | None":
     """Reverse of encode_deal_to_param. Never raises — malformed, truncated,
     oversized, or wrong-version params all return None (share links arrive
@@ -348,7 +362,14 @@ def decode_deal_from_param(param) -> "dict | None":
         raw = decomp.decompress(packed, _MAX_DECOMPRESSED_BYTES)
         if decomp.unconsumed_tail:  # payload larger than our cap — refuse
             return None
-        envelope = json.loads(raw.decode("utf-8"))
+        # parse_constant rejects the JSON literals Infinity/-Infinity/NaN.
+        # Python's json accepts them by default, and int(float("inf")) raises
+        # OverflowError deep inside restore — a hand-crafted ?d= link could
+        # crash the app for whoever opened it. Refuse the payload instead.
+        envelope = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=_reject_non_finite,
+        )
     except Exception:
         return None
     if not isinstance(envelope, dict) or envelope.get("v") != SCHEMA_VERSION:
@@ -587,7 +608,11 @@ def _supabase_creds() -> "tuple[str, str] | None":
             if url and key:
                 return url, key
     except Exception:
-        pass
+        # No secrets file at all is the normal local/unconfigured case, and
+        # st.secrets raises rather than returning empty. Debug-level: this is
+        # a configuration state, not an incident — logging a traceback here on
+        # every render would bury the failures that actually matter.
+        _log.debug("Supabase secrets unavailable", exc_info=True)
     return None
 
 
@@ -605,6 +630,7 @@ def _build_store() -> "DealStore | None":
         try:
             return SupabaseStore(*creds)
         except Exception:
+            _log.exception("SupabaseStore init failed; saving disabled")
             # Bad secrets or missing package — degrade to "no saving" rather
             # than crash the whole app at import/render time.
             return None
@@ -649,7 +675,9 @@ def render_save_controls(queue_fn):
     st.sidebar.markdown("**Share this deal**")
     st.sidebar.code(get_share_url(capture_deal_state()), language=None)
     st.sidebar.caption(
-        "Anyone with this link opens this exact deal — no sign-in needed."
+        "Anyone with this link opens this exact deal — no sign-in needed. "
+        "The link carries every input you entered, so treat it like the deal "
+        "file itself."
     )
 
     store = get_store()
@@ -662,16 +690,22 @@ def render_save_controls(queue_fn):
         st.sidebar.caption("Sign in above to save deals.")
         return
 
+    # The placeholder used to read "e.g., Acme Wealth — 2x rev", which invited
+    # users to type a target's name into a field that gets stored and shared —
+    # defeating the manifest's deliberate exclusion of firm identity.
     name = st.sidebar.text_input(
         "Deal name",
         key="_persist_deal_name",
-        placeholder="e.g., Acme Wealth — 2x rev",
+        placeholder="e.g., Midwest tuck-in — 2x rev",
+        help="Only you see this. Avoid the target's name if the deal is "
+             "confidential — saved names travel with shared links.",
     )
     if st.sidebar.button("Save this deal", key="_persist_save_btn", use_container_width=True):
         deal_name = (name or "").strip()[:80] or f"Untitled deal — {_utc_now_iso()[:10]}"
         try:
             store.save(email, deal_name, capture_deal_state())
         except Exception:
+            _log.exception("deal save failed")
             st.sidebar.error("Couldn't save right now — try again in a moment.")
         else:
             _invalidate_deals_cache()
@@ -698,6 +732,7 @@ def render_my_deals(queue_fn):
     try:
         deals = _cached_deals(store, email)
     except Exception:
+        _log.exception("listing saved deals failed")
         st.sidebar.caption("Couldn't reach saved deals — try again in a moment.")
         return
     if not deals:
@@ -719,6 +754,7 @@ def render_my_deals(queue_fn):
             try:
                 state = store.load(deal_id, email)
             except Exception:
+                _log.exception("deal load failed")
                 state = None
             if state:
                 applied = restore_deal_state(state, queue_fn)
@@ -735,6 +771,7 @@ def render_my_deals(queue_fn):
             try:
                 state = store.load(deal_id, email)
             except Exception:
+                _log.exception("deal load failed")
                 state = None
             if state:
                 st.sidebar.code(get_share_url(state), language=None)
@@ -742,6 +779,7 @@ def render_my_deals(queue_fn):
             try:
                 store.delete(deal_id, email)
             except Exception:
+                _log.exception("deal delete failed")
                 st.sidebar.error("Couldn't delete that deal.")
             else:
                 _invalidate_deals_cache()
@@ -797,7 +835,19 @@ def apply_deal_from_url(queue_fn) -> bool:
         )
         return False
 
-    applied = restore_deal_state(state, queue_fn)
+    # Belt and braces: decode already rejects non-finite payloads and restore
+    # skips bad keys, but this call sits at app.py top level — anything that
+    # escapes here is a stack trace in the recipient's face on a link they were
+    # told to trust. Degrade to a blank calculator instead.
+    try:
+        applied = restore_deal_state(state, queue_fn)
+    except Exception:
+        _log.exception("share-link restore failed")
+        st.toast(
+            "That share link looks damaged — opening a blank calculator instead.",
+            icon="⚠️",
+        )
+        return False
     st.session_state["show_calculator"] = True  # skip the welcome page
     st.session_state["_persist_url_toast"] = applied
     st.rerun()

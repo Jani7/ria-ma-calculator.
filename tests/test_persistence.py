@@ -227,6 +227,39 @@ def test_restore_rejects_non_dict():
 # ------------------------------------------------------------------------------
 # SQLiteStore CRUD
 # ------------------------------------------------------------------------------
+def test_non_finite_payload_is_refused():
+    """A hand-built ?d= carrying Infinity/NaN must never reach restore.
+
+    Python's json accepts the Infinity/-Infinity/NaN literals by default, and
+    int(float("inf")) raises OverflowError deep inside restore_deal_state — so
+    a crafted link would have crashed the app for whoever opened it, on a link
+    they were told to trust. decode must reject the envelope outright, and
+    restore must survive one even if it is handed one directly.
+    """
+    import base64 as _b64, json as _json, zlib as _zlib
+
+    for literal in ("Infinity", "-Infinity", "NaN"):
+        raw = '{"v": 1, "s": {"aum": %s}}' % literal
+        # Sanity: this really is parseable JSON by default. If that ever stops
+        # being true this test is guarding nothing and should be revisited.
+        assert _json.loads(raw)["s"]["aum"] is not None
+        param = _b64.urlsafe_b64encode(
+            _zlib.compress(raw.encode("utf-8"), 9)
+        ).decode("ascii").rstrip("=")
+        assert decode_deal_from_param(param) is None, \
+            f"{literal} payload was not refused"
+
+    # Defence in depth: even handed the state directly, restore must not raise.
+    queued = {}
+    applied = restore_deal_state(
+        {"aum": float("inf"), "revenue": float("nan"), "ebitda": 1_600_000},
+        lambda k, v: queued.__setitem__(k, v),
+    )
+    assert "aum" not in queued and "revenue" not in queued, queued
+    assert queued.get("ebitda") == "1,600,000", queued
+    assert applied == 1, applied
+
+
 def test_sqlite_store_crud():
     tmpdir = tempfile.mkdtemp(prefix="deals_test_")
     try:

@@ -1039,8 +1039,12 @@ def render_welcome_page():
             st.session_state.show_calculator = True
             st.rerun()
 
+    # "Inputs are session-only" stopped being true the moment save/share
+    # shipped. The honest version still leads with the same promise (no
+    # sign-up to use it) without claiming nothing is ever stored.
     st.markdown(
-        '<div class="cta-hint">No sign-up. Inputs are session-only. '
+        '<div class="cta-hint">Free, no sign-up required. Nothing is stored '
+        'unless you save or share a deal. '
         'Free SEC ADV lookups for ~16K registered RIAs.</div>',
         unsafe_allow_html=True,
     )
@@ -1208,17 +1212,17 @@ def render_instructions_tab():
             <div class="step-num">3</div>
             <div class="step-content">
                 <p><strong>Everything updates live.</strong> As you change any input in the sidebar,
-                the five analysis tabs on the right recalculate instantly. There&rsquo;s no
+                the analysis tabs on the right recalculate instantly. There&rsquo;s no
                 submit button &mdash; just adjust the inputs and watch the outputs change.</p>
             </div>
         </div>
         <div class="step-row">
             <div class="step-num">4</div>
             <div class="step-content">
-                <p><strong>Work through the tabs left to right.</strong> Start with
-                Deal Summary for headline numbers, then dig into Pro Forma for the P&amp;L,
-                Sensitivity for stress testing, Earnout for seller economics,
-                and Debt for amortization and DSCR.</p>
+                <p><strong>Work through the tabs left to right, then open Deal Memo.</strong>
+                Start with Deal Summary for the headline numbers, use Financials and
+                Returns &amp; Stress to pressure-test them, then open Deal Memo for a
+                five-page write-up you can download as a PDF and forward.</p>
             </div>
         </div>
     </div>
@@ -1234,29 +1238,32 @@ def render_instructions_tab():
                 waterfall chart, IRR, cash-on-cash, breakeven year, DSCR</span>
             </div>
             <div class="nav-item">
-                <strong>Pro Forma Financials</strong>
-                <span>5-year P&amp;L table with revenue, expenses, debt service, net cash flow.
-                Combined entity view if buyer profile is enabled.</span>
+                <strong>Financials</strong>
+                <span>5-year P&amp;L with revenue, expenses, debt service and net cash flow,
+                then the loan amortization, principal-vs-interest split, and DSCR by year
+                against the 1.25x lender threshold.</span>
             </div>
             <div class="nav-item">
-                <strong>Sensitivity Analysis</strong>
-                <span>Two heatmaps &mdash; IRR by multiple vs. attrition, and breakeven
-                by growth vs. multiple. Use these to find where the deal breaks.</span>
+                <strong>Returns &amp; Stress</strong>
+                <span>Two heatmaps (IRR by multiple vs. attrition; breakeven by growth vs.
+                multiple) to find where the deal breaks, plus earnout payouts under three
+                scenarios and the seller-proceeds timeline.</span>
             </div>
             <div class="nav-item">
-                <strong>Earnout &amp; Seller Economics</strong>
-                <span>Earnout payouts under 3 scenarios, cumulative seller proceeds timeline,
-                and seller note amortization schedule.</span>
+                <strong>Integration</strong>
+                <span>Year-by-year synergy ramp &mdash; cost takeout, revenue uplift and the
+                one-time cost of capturing them, scaled by what the buyer already has.</span>
             </div>
             <div class="nav-item">
-                <strong>Debt Analysis</strong>
-                <span>Full loan amortization, principal vs. interest breakdown, and DSCR
-                by year with 1.25x lender threshold marked.</span>
+                <strong>Deal Memo</strong>
+                <span>A five-page write-up of everything above: verdict, valuation,
+                structure, returns, integration, risks and comps. Download it as a PDF
+                and forward it.</span>
             </div>
             <div class="nav-item">
-                <strong>PDF Export (bottom of page)</strong>
-                <span>Scroll past the tabs to the footer. Click &ldquo;Export Full Analysis
-                to PDF&rdquo; to download a complete report.</span>
+                <strong>Save &amp; share (sidebar and footer)</strong>
+                <span>Copy a share link and anyone who opens it lands on this exact deal &mdash;
+                no sign-in needed. Sign in to save deals and reload them later.</span>
             </div>
         </div>
     </div>
@@ -2341,20 +2348,27 @@ with tab_summary:
         f"Size {_f['size']:.2f}× · "
         f"Growth {_f['growth']:.2f}× · "
         f"Margin {_f['margin']:.2f}× · "
-        f"Book {_f['book_quality']:.2f}× · "
-        f"Geo {_f['geography']:.2f}× · "
-        f"Key-person {_f['key_person']:.2f}×"
+        # Book quality, geography and key-person dependence are real drivers of
+        # an RIA multiple, but this app doesn't collect them — the engine holds
+        # them at a neutral 1.00x. Listing them beside the four factors that DO
+        # move implied they were assessed. Name them as not-yet-modeled instead.
+        "Book / Geo / Key-person: not yet modeled (held neutral)"
     )
     # (Prose bid-vs-band verdict removed — the insight strip above carries it
     # with severity color and the band micro-viz; duplicating it as a caption
     # was the "numbers AND words to interpret" density problem.)
     if aum > 10e9:
+        # The old copy cited Hellman & Friedman/Edelman, Stone Point/Mariner and
+        # GTCR/Captrust at "16-22x EBITDA" as precedent. data/SOURCES.md rejects
+        # exactly those deals as unverifiable "sources say" pricing — so the app
+        # was contradicting its own provenance standard on screen. Directional
+        # language only; if we can't source a number, we don't print one.
         st.caption(
-            "Mega-RIA caveat: at $10B+ AUM, valuations are bespoke and driven by "
-            "enterprise dynamics (PE rolls, equity stakes, sum-of-the-parts). Recent "
-            "aggregator transactions priced at 16-22× EBITDA — see Hellman & Friedman / "
-            "Edelman, Stone Point / Mariner, GTCR / Captrust for precedent. Band above "
-            "should be read directionally only."
+            "Mega-RIA caveat: at \\$10B+ AUM, valuations are bespoke and driven by "
+            "enterprise dynamics (PE rolls, equity stakes, sum-of-the-parts), and "
+            "they typically clear well above the multiples this band models. Terms "
+            "at this scale are rarely disclosed, so treat the band above as "
+            "directional only and price from advisor-quoted precedent."
         )
 
     # ---- Suggested Deal Structure (banker memo, Part C) ----
@@ -2721,6 +2735,11 @@ with tab_returns:
     base_params = dict(
         revenue=annual_revenue, ebitda=ebitda, owner_comp=owner_comp,
         growth_rate=rev_growth, attrition_rate=attrition_rate, aum=aum,
+        # pct_recurring was omitted here, so both heatmaps silently defaulted
+        # to 100% recurring — a 6.0x exit multiple regardless of the slider.
+        # The returns insight on this same tab uses the real value, so the
+        # strip and the grid beneath it could disagree on one screen.
+        pct_recurring=pct_recurring,
         purchase_price=purchase_price, pct_upfront=pct_upfront_cash,
         pct_seller_note=pct_seller_note, note_rate=note_rate, note_term=note_term,
         pct_earnout=pct_earnout, earnout_period=earnout_period,
@@ -3288,7 +3307,11 @@ if st.button("Export Full Analysis to PDF", type="primary"):
         st.error("PDF generation failed. Please try again or contact support if the issue persists.")
 
 st.markdown("### Share This Deal")
-st.caption("Anyone with this link opens this exact deal — no sign-in needed.")
+st.caption(
+    "Anyone with this link opens this exact deal — no sign-in needed. "
+    "The link carries every input you entered, so treat it like the deal "
+    "file itself."
+)
 st.code(persistence.get_share_url(persistence.capture_deal_state()), language=None)
 
 render_site_footer()

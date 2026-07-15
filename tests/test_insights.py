@@ -26,6 +26,7 @@ from calculations import (
 )
 from insights import (
     Insight, compute_all_insights, select_insight, verdict_from_insights,
+    render_verdict_bar, _insight_returns, _insight_valuation,
 )
 
 PASSED = 0
@@ -133,8 +134,14 @@ def test_zero_state():
     ok("compute_all_insights returns []", out == [])
     ok("select_insight returns None", select_insight(out, "valuation") is None)
     v, c = verdict_from_insights(out)
-    ok("empty verdict is GO with zero counts",
-       v == "GO" and c == {"negative": 0, "caution": 0, "positive": 0})
+    # Nothing scored must never read as GO — a green verdict with no evidence
+    # behind it is worse than no verdict. (Reproduced in the wild: post-SEC
+    # apply with EBITDA still blank stamped "GO - 0 flags, 0 caution, 0 clear".)
+    ok("empty verdict is INCOMPLETE, not GO",
+       v == "INCOMPLETE" and c == {"negative": 0, "caution": 0, "positive": 0})
+    bar = render_verdict_bar(v, c)
+    ok("INCOMPLETE bar renders and says what's missing",
+       "memo-verdict--incomplete" in bar and "enter EBITDA" in bar)
 
 
 def test_scenario_1():
@@ -144,8 +151,14 @@ def test_scenario_1():
     k = by_kind(ins)
     ok("all six insights produced", len(ins) == 6, f"got {sorted(k)}")
 
-    ok("valuation positive", k["valuation"].severity == "positive")
-    ok("valuation text", k["valuation"].text == "Bid sits $3.7M below the band.",
+    # The spec originally expected "positive" here. Banker review overruled it:
+    # an $8.0M bid is 32% under the $11.7M band low, and scoring that a clean
+    # win is the naive read — either the seller walks or diligence hasn't found
+    # the reason they wouldn't. Below DEEP_DISCOUNT_FRACTION * low it's caution.
+    ok("deep-discount valuation is caution, not positive",
+       k["valuation"].severity == "caution")
+    ok("valuation text",
+       k["valuation"].text == "Bid sits $3.7M below the band — confirm seller expectations.",
        repr(k["valuation"].text))
     ok("valuation viz payload",
        round(k["valuation"].data["low"] / 1e6, 1) == 11.7
@@ -180,13 +193,20 @@ def test_scenario_1():
        repr(k["attrition"].text))
 
     v, c = verdict_from_insights(ins)
-    ok("verdict GO", v == "GO", v)
-    ok("counts 0 flags / 1 caution / 5 clear",
-       c == {"negative": 0, "caution": 1, "positive": 5}, c)
+    # Spec said GO. Banker review moved it: two cautions (a 32%-under-band bid
+    # and a thin Y1 covenant cushion) is exactly the "this looks too good --
+    # go check it" signal that was missing when this scenario stamped a clean
+    # GO on a 4.7x purchase of a 90%-recurring, 40%-margin book.
+    ok("verdict CAUTION (deep discount + thin DSCR)", v == "CAUTION", v)
+    ok("counts 0 flags / 2 caution / 4 clear",
+       c == {"negative": 0, "caution": 2, "positive": 4}, c)
 
-    # Priority table: valuation is positive -> Tab 1 shows the comps insight.
-    ok("select valuation-tab -> comps",
-       select_insight(ins, "valuation").kind == "comps")
+    # Priority table: a caution/negative valuation wins Tab 1. Under the old
+    # scoring this bid was positive and the tab fell through to comps; now the
+    # deep-discount caution takes the slot, which is the spec's intent ("bid
+    # outside the band wins; else show comps position").
+    ok("select valuation-tab -> valuation (caution wins the slot)",
+       select_insight(ins, "valuation").kind == "valuation")
     ok("select financials -> dscr", select_insight(ins, "financials").kind == "dscr")
     ok("select returns -> returns", select_insight(ins, "returns").kind == "returns")
     ok("select integration -> synergy",
@@ -355,6 +375,41 @@ def test_select_contract():
     ok("unknown section raises ValueError", raised)
 
 
+def test_irr_garbage_guard():
+    """A deal whose cash flows never turn positive must never read as clearing.
+
+    The engine's Newton solver returns ~1e10+ on sign-change-less series.
+    Unguarded, that rendered "IRR 1721053807567.8% clears typical sponsor
+    hurdles" as a POSITIVE insight and softened the memo verdict from
+    RECONSIDER to CAUTION on a deal that loses money every year."""
+    print("\ntest_irr_garbage_guard")
+    for junk in (1.7e10, 1e17, -5.0, float("inf")):
+        ins = _insight_returns({"returns": {"irr_yr5": junk}})
+        ok(f"IRR {junk:.3g} -> negative, not positive",
+           ins is not None and ins.severity == "negative",
+           f"got {ins.severity if ins else None}")
+        ok(f"IRR {junk:.3g} copy refuses to quote the number",
+           "not meaningful" in ins.text and "clears" not in ins.text,
+           ins.text)
+    # A sane IRR must still be scored normally.
+    sane = _insight_returns({"returns": {"irr_yr5": 0.557}})
+    ok("sane IRR 55.7% still clears", sane.severity == "positive")
+
+
+def test_deep_discount_skepticism():
+    """A bid far under the band is a question, not a win (banker review)."""
+    print("\ntest_deep_discount_skepticism")
+    val = {"low": 11.7e6, "mid": 13.7e6, "high": 15.8e6}
+    deep = _insight_valuation({"valuation": val, "purchase_price": 8.0e6})
+    ok("32%-under-band bid scores caution, not positive",
+       deep.severity == "caution", f"got {deep.severity}")
+    ok("deep-discount copy asks about the seller",
+       "seller expectations" in deep.text, deep.text)
+    # Just below the band but not implausibly so -> still a clean positive.
+    mild = _insight_valuation({"valuation": val, "purchase_price": 11.0e6})
+    ok("mildly-under-band bid stays positive", mild.severity == "positive")
+
+
 if __name__ == "__main__":
     test_zero_state()
     test_scenario_1()
@@ -363,4 +418,6 @@ if __name__ == "__main__":
     test_info_states()
     test_verdict_rules()
     test_select_contract()
+    test_irr_garbage_guard()
+    test_deep_discount_skepticism()
     print(f"\nAll {PASSED} assertions passed.")

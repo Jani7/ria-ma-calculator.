@@ -121,8 +121,17 @@ print(f"      insights module: {'REAL' if USING_REAL_INSIGHTS else 'STUB'}")
 # ------------------------------------------------------------------
 AUM, REVENUE, EBITDA, OWNER_COMP = 500e6, 4.0e6, 1.6e6, 500e3
 PCT_RECURRING, GROWTH, ATTRITION = 90.0, 0.05, 0.05
-BID = 8.0e6
-UPFRONT, NOTE, EARNOUT, ROLLOVER, SELF_FUNDED = 0.75, 0.10, 0.10, 0.05, 0.30
+# The bid sits INSIDE the computed band ($11.7M-$15.8M). This fixture is not
+# just a test input — it renders tests/_memo_scenario1.pdf, the sample artifact
+# prospects judge the product on. The old $8.0M bid produced a 4.7x purchase of
+# a 90%-recurring, 40%-margin book at a 72.4% IRR and stamped GO on it; two
+# reviewers independently said any banker reads that as naive within ten
+# seconds. A market-plausible deal is a better demo than a fantasy one.
+BID = 13.0e6
+# Self-funded raised 30% -> 70%: at 30% the sample levered into a 0.97x Y1 DSCR
+# (covenant breach) and a 38-50% IRR. This structure lands IRR ~27% with a 1.74x
+# DSCR cushion — a deal a buyer could actually take to a committee.
+UPFRONT, NOTE, EARNOUT, ROLLOVER, SELF_FUNDED = 0.75, 0.10, 0.10, 0.05, 0.70
 LOAN_RATE, LOAN_TERM, NOTE_RATE, NOTE_TERM, EARNOUT_PERIOD = 0.085, 10, 0.065, 5, 3
 
 replacement = auto_replacement_cost(AUM)

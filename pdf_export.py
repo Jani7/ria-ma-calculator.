@@ -204,6 +204,7 @@ from memo_mode import (  # noqa: E402  (kept with the memo section it serves)
     build_memo_data, is_zero_state, pdf_safe,
     fmt_money, fmt_money_table, fmt_mult, fmt_dscr, fmt_irr,
     _sev, _plain, _breakeven_parts,
+    APP_URL as MEMO_APP_URL, MEMO_DISCLAIMER,
 )
 
 _M_ACCENT = (124, 140, 255)
@@ -219,7 +220,8 @@ _SEV_RGB = {
     "positive": _M_POS, "caution": _M_CAUTION, "negative": _M_NEG,
     "info": _M_ACCENT, "muted": _M_MUTED,
 }
-_VERDICT_RGB = {"go": _M_POS, "caution": _M_CAUTION, "reconsider": _M_NEG}
+_VERDICT_RGB = {"go": _M_POS, "caution": _M_CAUTION, "reconsider": _M_NEG,
+                "incomplete": _M_MUTED}
 _SEG_RGB = {"upfront": _M_ACCENT, "note": _M_LIGHT,
             "earnout": _M_MUTED, "rollover": _M_DARK}
 
@@ -256,7 +258,8 @@ class MemoPDF(FPDF):
         self.set_y(-13)
         self.set_font("Helvetica", "", 7.5)
         self.set_text_color(*_M_MUTED)
-        self.cell(120, 5, "Prepared with RIA M&A Calculator -- not investment advice",
+        # The URL is the only way back to the funnel from a printed page.
+        self.cell(120, 5, f"Prepared with RIA M&A Calculator -- {MEMO_APP_URL}",
                   align="L")
         self.cell(50, 5, f"Page {self.page_no()} of 5", align="R")
 
@@ -293,9 +296,26 @@ def _m_caption(pdf, text):
     pdf.ln(1)
 
 
-def _m_insight(pdf, ins):
+def _m_disclaimer(pdf, text):
+    """Boxed small print, last page only. Deliberately quiet but unmissable:
+    a forwarded memo has to carry its own scope limits."""
+    pdf.set_x(20)
+    y = pdf.get_y()
+    pdf.set_draw_color(*_M_LIGHT)
+    pdf.set_line_width(0.2)
+    pdf.set_font("Helvetica", "", 7.2)
+    pdf.set_text_color(*_M_MUTED)
+    pdf.multi_cell(170, 3.4, pdf_safe(text), align="L", border=0)
+    pdf.rect(20, y - 1.5, 170, pdf.get_y() - y + 2.5)
+    pdf.ln(1)
+
+
+def _m_insight(pdf, ins, drop_sub=False):
     """One insight strip: thin box, 1mm severity left bar, dot, plain text.
-    Severity and copy come from insights.py via the digest -- never re-derived."""
+    Severity and copy come from insights.py via the digest -- never re-derived.
+
+    drop_sub suppresses the hedge sub-label where the page states the same
+    reference in a caption (page 3's returns strip)."""
     if ins is None:
         return
     sev = _sev(ins)
@@ -313,7 +333,7 @@ def _m_insight(pdf, ins):
     pdf.set_text_color(*_M_BLACK)
     text = pdf_safe(_plain(ins))
     data = getattr(ins, "data", None)
-    sub = data.get("sub") if isinstance(data, dict) else None
+    sub = None if drop_sub else (data.get("sub") if isinstance(data, dict) else None)
     if sub:
         pdf.cell(108, 5, text, align="L")
         pdf.set_xy(x + 118, y + 3.4)
@@ -676,7 +696,8 @@ def generate_memo_pdf(ctx, extras):
         dots=[dots["irr"], dots["coc"], dots["be"], dots["dscr"]],
     )
     pdf.ln(1)
-    _m_insight(pdf, d["ins"]["returns"])
+    # drop_sub: the hurdle caption below states the ~18-22% reference already.
+    _m_insight(pdf, d["ins"]["returns"], drop_sub=True)
     _m_insight(pdf, d["ins"]["dscr"])
     pdf.ln(1)
     _m_caption(pdf, d["hurdle_caption"])
@@ -737,8 +758,17 @@ def generate_memo_pdf(ctx, extras):
                  _M_CAUTION if r["est"] else None),
             ])
         _m_table(pdf, headers, widths, rows, body_size=8.5)
+        # A printed page 5 circulates without anyone here to explain it: real
+        # buyer/seller names sitting beside a modeled multiple need the legend
+        # spelled out, not compressed into a four-character tag.
+        _m_caption(pdf, "Est. = modeled estimate; the multiple was not "
+                        "disclosed by the parties and is excluded from the "
+                        "benchmark above. Confirmed = multiple stated in, or "
+                        "derived from, a cited primary source.")
     elif not c["available"]:
         _m_caption(pdf, "No comparable-transactions database is available in "
                         "this deployment.")
 
+    pdf.ln(3)
+    _m_disclaimer(pdf, MEMO_DISCLAIMER)
     return bytes(pdf.output())

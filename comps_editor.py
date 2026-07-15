@@ -123,11 +123,17 @@ def _apply_editor_deltas() -> None:
     added = state.get("added_rows", [])
     if added:
         add_df = pd.DataFrame(added)
-        # A user's own rows are presumed real unless they say otherwise.
+        # A new row is an estimate until it cites a source. Presuming rows real
+        # let an unsourced guess feed the confirmed-only benchmark and print
+        # "Confirmed" in an IC memo — the exact provenance failure this whole
+        # comps pass exists to end. Supplying a source_url flips it to confirmed.
         if "is_estimated" not in add_df.columns:
-            add_df["is_estimated"] = False
+            add_df["is_estimated"] = True
         else:
-            add_df["is_estimated"] = add_df["is_estimated"].fillna(False)
+            add_df["is_estimated"] = add_df["is_estimated"].fillna(True)
+        if "source_url" in add_df.columns:
+            _sourced = add_df["source_url"].fillna("").astype(str).str.strip() != ""
+            add_df.loc[_sourced & add_df["is_estimated"].isna(), "is_estimated"] = False
         add_df = add_df.reindex(columns=_COLUMNS)
         df = pd.concat([df, add_df], ignore_index=True)
 

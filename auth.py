@@ -21,10 +21,17 @@ otherwise Supabase emails a link instead of a code. See the integration
 notes checklist.
 """
 
+import logging
+
 import re
 import time
 
 import streamlit as st
+
+# Operator visibility. Streamlit Cloud surfaces stderr in the app logs;
+# without this, Supabase outages, quota exhaustion and schema drift are
+# all silent. Never log PII (emails, deal economics) — message only.
+_log = logging.getLogger(__name__)
 
 _RESEND_COOLDOWN_SEC = 60
 # Loose sanity check only — Supabase does the real validation. This just
@@ -42,7 +49,11 @@ def _supabase_creds() -> "tuple[str, str] | None":
             if url and key:
                 return url, key
     except Exception:
-        pass
+        # No secrets file at all is the normal local/unconfigured case, and
+        # st.secrets raises rather than returning empty. Debug-level: this is
+        # a configuration state, not an incident — logging a traceback here on
+        # every render would bury the failures that actually matter.
+        _log.debug("Supabase secrets unavailable", exc_info=True)
     return None
 
 
@@ -63,6 +74,7 @@ def _get_client():
 
         return create_client(*creds)
     except Exception:
+        _log.exception("Supabase client init failed; auth disabled")
         return None
 
 
@@ -81,6 +93,7 @@ def _send_code(client, email: str) -> bool:
             {"email": email, "options": {"should_create_user": True}}
         )
     except Exception:
+        _log.exception("OTP send failed")
         st.sidebar.error(
             "Couldn't send the code — double-check the address and try again."
         )
@@ -110,7 +123,8 @@ def render_auth_widget() -> "str | None":
             try:
                 client.auth.sign_out()
             except Exception:
-                pass  # local session teardown is what actually matters
+                # Local session teardown below is what actually matters.
+                _log.exception("Supabase sign-out call failed")
             for k in ("_auth_stage", "_auth_verified", "_auth_email", "_auth_last_send_ts"):
                 st.session_state.pop(k, None)
             # Saved-deals cache belongs to the signed-out user — drop it.
@@ -135,6 +149,7 @@ def render_auth_widget() -> "str | None":
                 )
                 ok = getattr(res, "user", None) is not None
             except Exception:
+                _log.exception("OTP verify failed")
                 ok = False
             if ok:
                 st.session_state["_auth_verified"] = True

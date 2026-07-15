@@ -762,9 +762,11 @@ def generate_memo_pdf(ctx, extras):
         # buyer/seller names sitting beside a modeled multiple need the legend
         # spelled out, not compressed into a four-character tag.
         _m_caption(pdf, "Est. = modeled estimate; the multiple was not "
-                        "disclosed by the parties and is excluded from the "
-                        "benchmark above. Confirmed = multiple stated in, or "
-                        "derived from, a cited primary source.")
+                        "disclosed by the parties. Confirmed = flagged as "
+                        "sourced: rows shipped with this tool cite a primary "
+                        "source, rows added by the preparer are their own "
+                        "attestation. The benchmark above uses confirmed "
+                        "rows only.")
     elif not c["available"]:
         _m_caption(pdf, "No comparable-transactions database is available in "
                         "this deployment.")

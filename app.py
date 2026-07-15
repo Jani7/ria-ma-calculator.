@@ -1291,9 +1291,9 @@ def render_instructions_tab():
         </table>
         <p class="note">
             <strong>What to look for:</strong> Check Deal Summary for the implied EBOC multiple
-            (should be under 5x for a quality deal). Go to Sensitivity Analysis and see how
+            (should be under 5x for a quality deal). Go to Returns &amp; Stress and see how
             IRR holds up if attrition spikes to 8-10% in the first two years &mdash; this is the
-            key risk in platform acquisitions where the founder is departing. The Earnout tab
+            key risk in platform acquisitions where the founder is departing. The same tab
             shows what the seller actually receives under different retention outcomes.
         </p>
     </div>
@@ -1321,13 +1321,13 @@ def render_instructions_tab():
         </table>
         <p class="note">
             <strong>What to look for:</strong> This is a riskier deal with higher attrition and
-            a concentrated book. In the Pro Forma tab, watch Year 1-2 net cash flow &mdash;
-            it may go negative with consulting costs and integration drag. The Debt tab
-            will show whether DSCR stays above 1.25x. Check if the seller note standstill
-            helps early-year cash flow. In Sensitivity, stress test the 7% attrition up
-            to 12% &mdash; with only 150 clients, losing a few large households can materially
-            change the outcome. Enable the combined entity view in Buyer Profile to see the
-            post-acquisition $10.5B platform picture.
+            a concentrated book. In Financials, watch Year 1-2 net cash flow &mdash;
+            it may go negative with consulting costs and integration drag &mdash; then check
+            further down the same tab whether DSCR stays above 1.25x, and whether the seller
+            note standstill helps early-year cash flow. In Returns &amp; Stress, push the 7%
+            attrition up to 12% &mdash; with only 150 clients, losing a few large households
+            can materially change the outcome. Enable the combined entity view in Buyer
+            Profile to see the post-acquisition $10.5B platform picture.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -2146,6 +2146,21 @@ _comps_band = (
                       include_estimated=_include_est)
     if len(_comps_df_active) > 0 else None
 )
+# The memo gets a CONFIRMED-ONLY band, always — never the toggle-honoring one.
+# Tab 1 is an exploration surface: you ticked "include estimates", the caption
+# says so, and the screen is in front of you. The memo is a document that
+# leaves the building and gets forwarded to an investment committee, where a
+# band built from modeled guesses would be read as market evidence. Enforcing
+# that structurally here is worth one extra lookup; relying on the memo to
+# police provenance downstream is how it printed "17 confirmed" against a
+# frame holding 4.
+_comps_band_confirmed = (
+    _comps_band if not _include_est else (
+        lookup_comps_band(aum, pct_recurring, _comps_df_active,
+                          include_estimated=False)
+        if len(_comps_df_active) > 0 else None
+    )
+)
 
 _insight_ctx = {
     "purchase_price": purchase_price,
@@ -2605,8 +2620,14 @@ with tab_summary:
     # IRR / CoC come back as None when the buyer has no equity at risk
     # (100% leverage or 0% upfront) — show 'n/a' so a junior analyst can't
     # screenshot a misleading thousands-of-percent figure.
+    #
+    # None was never the only way to get one. The engine's Newton solver
+    # returns finite garbage (~1e15) when the cash flows never change sign,
+    # and this card printed it in GREEN — "5-Year IRR = 286746111107328000.0%"
+    # — directly beside the red insight strip saying the number is meaningless.
+    # irr_is_meaningful() is the shared gate every IRR surface now goes through.
     irr5 = returns.get("irr_yr5")
-    if irr5 is None:
+    if not ins.irr_is_meaningful(irr5):
         irr_display, irr_class = "n/a", "neutral"
     else:
         irr_display = fmt_pct(irr5)
@@ -3226,15 +3247,20 @@ with tab_integration:
 # TAB 5 -- Deal Memo (5-page IC-ready document + PDF)
 # ==============================================================================
 with tab_memo:
-    # Display-only frame for the page-5 table: estimated deals still list
-    # (flagged Est.) but never feed the band, which stays confirmed-aware
-    # via the hoisted _comps_band shared with Tab 1 and the insight layer.
+    # Display-only frame for the page-5 table: estimated deals still LIST
+    # (flagged Est.) but never feed the band.
     _memo_comps_table = (
         lookup_comps_band(aum, pct_recurring, _comps_df_active,
                           include_estimated=True).get("slice_df")
         if len(_comps_df_active) > 0 else None
     )
     _memo_ctx = dict(_insight_ctx)
+    # Override the shared (toggle-honoring) band with the confirmed-only one.
+    # _insight_ctx carries _comps_band so Tab 1 and the insight strip agree
+    # with what the user ticked; the memo must not. Without this line, ticking
+    # "include estimated rows" printed a median built from modeled guesses onto
+    # a page that a committee reads as market evidence.
+    _memo_ctx["comps"] = _comps_band_confirmed
     _memo_ctx["inputs"] = dict(
         _insight_ctx["inputs"],
         owner_comp=owner_comp, num_clients=num_clients,

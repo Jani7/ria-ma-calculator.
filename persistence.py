@@ -24,6 +24,7 @@ and the injectable `session` / `queue_fn` parameters.
 import base64
 import json
 import logging
+import math
 import sqlite3
 import uuid
 import zlib
@@ -209,14 +210,28 @@ _MAX_DECOMPRESSED_BYTES = 512 * 1024
 # Capture / restore
 # ==============================================================================
 def _to_number(raw) -> float:
-    """Parse ints/floats/comma-or-$-formatted strings. Raises on junk."""
+    """Parse ints/floats/comma-or-$-formatted strings. Raises on junk.
+
+    Non-finite values raise rather than propagate. Rejecting the JSON literals
+    Infinity/NaN at decode was not enough: the JSON *string* "nan" is an
+    ordinary string, float() happily parses it, and _clamp_num cannot filter it
+    because every comparison against NaN is False. It sailed through all eight
+    float keys and hard-crashed the pro-forma engine on attrition_rate — a
+    traceback in the face of whoever opened a link they were told to trust.
+    This is the chokepoint every numeric key already passes through, so it is
+    the right place to say no once.
+    """
     if isinstance(raw, bool):
         return float(raw)
     if isinstance(raw, (int, float)):
-        return float(raw)
-    if isinstance(raw, str):
-        return float(raw.replace(",", "").replace("$", "").strip())
-    raise TypeError(f"not a number: {type(raw).__name__}")
+        v = float(raw)  # OverflowError on huge ints -- caller catches it
+    elif isinstance(raw, str):
+        v = float(raw.replace(",", "").replace("$", "").strip())
+    else:
+        raise TypeError(f"not a number: {type(raw).__name__}")
+    if not math.isfinite(v):
+        raise ValueError(f"non-finite number: {raw!r}")
+    return v
 
 
 def _clamp_num(value, key):
@@ -287,7 +302,11 @@ def restore_deal_state(state: dict, queue_fn) -> int:
             restored_loan_term = _clamp_num(
                 int(round(_to_number(state["loan_term"]))), "loan_term"
             )
-        except (TypeError, ValueError):
+        # ArithmeticError too: float(10**4000) raises OverflowError before the
+        # non-finite guard in _to_number can run, and this pre-pass sits
+        # outside the main loop's handler — so a 4000-digit int in loan_term
+        # escaped every other layer and took the restore down with it.
+        except (TypeError, ValueError, ArithmeticError):
             restored_loan_term = None
 
     applied = 0

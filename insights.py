@@ -206,6 +206,27 @@ def _mk(kind: str, severity: str, parts, data: Optional[dict] = None,
     return Insight(kind=kind, severity=severity, text=plain, data=d)
 
 
+def irr_is_meaningful(v) -> bool:
+    """True only for a finite IRR inside the plausible band (-99%, +1000%).
+
+    THE shared gate for every surface that prints an IRR — the insight strip,
+    the Key Return Metrics card, the memo digest, and the PDF. It exists as a
+    public helper because clamping only the scorer left four renderers happily
+    printing "5-Year IRR = 286746111107328000.0%" in green, right next to the
+    red strip saying the number was meaningless. Any new IRR display must call
+    this; if it doesn't, it will eventually quote Newton's garbage to a client.
+    """
+    if v is None:
+        return False
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return False
+    if _math.isnan(f) or _math.isinf(f):
+        return False
+    return -0.99 < f < IRR_SANITY_CAP
+
+
 def _f(x, default=None):
     """Coerce to float, returning default on None/NaN/garbage."""
     try:

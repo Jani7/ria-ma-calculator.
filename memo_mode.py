@@ -26,7 +26,7 @@ from datetime import date
 try:
     from insights import (Insight, compute_all_insights, select_insight,
                           verdict_from_insights, render_insight,
-                          render_verdict_bar)
+                          render_verdict_bar, irr_is_meaningful)
     _HAS_INSIGHTS = True
 except ImportError:  # standalone import only -- insights.py ships alongside
     Insight = None
@@ -35,6 +35,7 @@ except ImportError:  # standalone import only -- insights.py ships alongside
     verdict_from_insights = None
     render_insight = None
     render_verdict_bar = None
+    irr_is_meaningful = None
     _HAS_INSIGHTS = False
 
 
@@ -74,7 +75,7 @@ MEMO_CSS = """
 .memo-h::before{content:"";width:3px;height:14px;background:#7c8cff;border-radius:2px;}
 .memo-para{font-size:0.92rem;line-height:1.65;color:#c5cad6;margin:14px 0;max-width:62ch;}
 .memo-caption{font-size:0.78rem;line-height:1.55;color:#8b94a8;margin:8px 0 0 0;}
-.memo-disclaimer{font-size:0.72rem;line-height:1.5;color:#6b7385;margin:18px 0 0 0;
+.memo-disclaimer{font-size:0.72rem;line-height:1.5;color:#8b94a8;margin:18px 0 0 0;
   padding:10px 12px;border:1px solid #1c2230;border-radius:6px;}
 .memo-verdict{
   display:flex;align-items:center;gap:12px;background:#0e1118;
@@ -554,7 +555,12 @@ def _exec_paragraph(d, ctx):
 
     # Sentence 3 -- returns and breakeven.
     irr5 = d["ret"]["irr5"]
-    if irr5 is None:
+    if irr5 is None and d["ret"].get("irr5_broken"):
+        parts.append(
+            "Five-year IRR is not meaningful at these terms — the cash flows "
+            "never turn positive."
+        )
+    elif irr5 is None:
         parts.append("Buyer equity is zero at these terms, so IRR is undefined.")
     else:
         verb = {"positive": "clears", "caution": "sits inside",
@@ -647,10 +653,21 @@ def _risk_bullets(d, ctx):
     # contradicted page 5, which correctly withholds the band entirely.
     if d["comps"]["available"]:
         if not d["comps"]["band_ok"]:
-            bullets.append(
-                "No confirmed comps in this slice — the band is withheld; "
-                "source a broker quote before pricing."
-            )
+            # band_ok needs >=5 confirmed rows, so "withheld" does NOT mean
+            # "zero" — with the shipped CSV a slice can hold 2 confirmed deals,
+            # which page 5 prints as "N=2" beside a table listing them. Saying
+            # "no confirmed comps" here contradicted that page directly.
+            _nc = d["comps"]["n_confirmed"]
+            if _nc == 0:
+                bullets.append(
+                    "No confirmed comps in this slice — the band is withheld; "
+                    "source a broker quote before pricing."
+                )
+            else:
+                bullets.append(
+                    f"Only {_nc} confirmed comp{'s' if _nc != 1 else ''} in this "
+                    f"slice — too few for a band; source a broker quote before pricing."
+                )
         elif d["comps"]["fallback"] or d["comps"]["n_used"] < 5:
             where = "after widening tiers" if d["comps"]["fallback"] else "in this slice"
             bullets.append(
@@ -796,8 +813,15 @@ def build_memo_data(ctx, extras):
     min_dscr, min_dscr_year = _min_dscr(pro_forma)
     irr5 = returns.get("irr_yr5")
     coc5 = returns.get("coc_yr5")
+    # Tri-state, not two: "no equity at risk" (irr_yr5 is None) and "the solver
+    # diverged because the deal never pays back" are different facts and the
+    # memo says different things about them. Both render as no number, but
+    # conflating them would tell a reader the deal is unlevered when it is
+    # actually underwater.
+    _irr_ok = irr_is_meaningful(irr5)
     ret = {
-        "irr5": float(irr5) if _is_num(irr5) else None,
+        "irr5": float(irr5) if _irr_ok else None,
+        "irr5_broken": (irr5 is not None and not _irr_ok),
         "coc5": float(coc5) if _is_num(coc5) else None,
         "breakeven": returns.get("breakeven_year"),
         "exit_mult": float(returns.get("exit_multiple") or 0),
@@ -1274,9 +1298,10 @@ def _page5_html(d):
         p.append('</tbody></table>')
         p.append(
             '<div class="memo-caption">Est. = modeled estimate; the multiple '
-            'was not disclosed by the parties and is excluded from the '
-            'benchmark above. Confirmed = multiple stated in, or derived '
-            'from, a cited primary source.</div>'
+            'was not disclosed by the parties. Confirmed = flagged as sourced: '
+            'rows shipped with this tool cite a primary source, rows added by '
+            'the preparer are their own attestation. The benchmark above uses '
+            'confirmed rows only.</div>'
         )
     elif not c["available"]:
         p.append(

@@ -209,12 +209,20 @@ def render_comps_editor() -> None:
             "channel": st.column_config.SelectboxColumn(
                 "Channel", options=_channel_options(base),
             ),
+            # default=True: a row you just typed is an estimate until you say
+            # otherwise. default=False meant five typed guesses rendered as an
+            # "N=5 confirmed" band beneath a legend certifying every row was
+            # "stated in, or derived from, a cited primary source" — a
+            # fabricated comp presented as a disclosed one, in a document
+            # built to be forwarded.
             "is_estimated": st.column_config.CheckboxColumn(
-                "Estimated?", default=False,
+                "Estimated?", default=True,
                 help=(
-                    "Tick when the multiple is a guess rather than a "
-                    "disclosed or reliably derived figure. Estimated rows "
-                    "sit out of the benchmark unless the toggle above is on."
+                    "On by default: a new row is an estimate until you cite a "
+                    "source for the multiple. Untick only when the figure is "
+                    "disclosed or reliably derived, and paste the source. "
+                    "Estimated rows sit out of the benchmark unless the "
+                    "toggle above is on, and never feed the Deal Memo."
                 ),
             ),
             "source_url": st.column_config.LinkColumn(

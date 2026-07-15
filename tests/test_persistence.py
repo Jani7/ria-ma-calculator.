@@ -11,6 +11,7 @@ only. Two ways to run (from ria_ma_calculator/):
 
 import base64
 import json
+import math
 import re
 import shutil
 import sys
@@ -249,15 +250,57 @@ def test_non_finite_payload_is_refused():
         assert decode_deal_from_param(param) is None, \
             f"{literal} payload was not refused"
 
-    # Defence in depth: even handed the state directly, restore must not raise.
+    # The JSON *string* "nan" is not a JSON literal — parse_constant never sees
+    # it, float() parses it happily, and _clamp_num cannot reject it because
+    # every comparison against NaN is False. It reached the pro-forma engine and
+    # crashed it. Guard the spelling explicitly, since it is the one that
+    # actually shipped broken.
+    raw = '{"v": 1, "s": {"attrition_rate": "nan"}}'
+    param = _b64.urlsafe_b64encode(
+        _zlib.compress(raw.encode("utf-8"), 9)
+    ).decode("ascii").rstrip("=")
+    queued = {}
+    restore_deal_state(decode_deal_from_param(param) or {}, queued.__setitem__)
+    assert "attrition_rate" not in queued, f'"nan" string reached the widget: {queued}'
+
+    # PROPERTY, not spellings: no non-finite value may reach a widget for ANY
+    # manifest key, however it is spelled, and restore must never raise. Asserting
+    # only the spellings the fix implements is how "nan" got through the first
+    # fix for the literal NaN.
+    payloads = [
+        "nan", "NaN", "NAN", "  nan  ", "-nan", "inf", "-inf", "+inf",
+        "Infinity", "1e999", "1e309", 10 ** 4000, -(10 ** 4000),
+        float("nan"), float("inf"), float("-inf"),
+    ]
+    for key in DEAL_STATE_KEYS:
+        for payload in payloads:
+            q = {}
+            try:
+                restore_deal_state({key: payload}, q.__setitem__)
+            except Exception as exc:  # noqa: BLE001 — a raise IS the failure
+                raise AssertionError(
+                    f"restore raised {type(exc).__name__} for {key}={payload!r:.20}"
+                ) from exc
+            for qk, qv in q.items():
+                if isinstance(qv, float):
+                    assert math.isfinite(qv), f"{key}={payload!r:.20} queued {qk}={qv}"
+                elif isinstance(qv, str):
+                    assert qv.strip().lower().lstrip("+-") not in (
+                        "nan", "inf", "infinity"
+                    ), f"{key}={payload!r:.20} queued {qk}={qv!r}"
+
+    # Legitimate restores must be completely unaffected by all of the above.
     queued = {}
     applied = restore_deal_state(
-        {"aum": float("inf"), "revenue": float("nan"), "ebitda": 1_600_000},
-        lambda k, v: queued.__setitem__(k, v),
+        {"aum": float("inf"), "revenue": float("nan"), "ebitda": 1_600_000,
+         "attrition_rate": 5.0, "loan_term": 7},
+        queued.__setitem__,
     )
     assert "aum" not in queued and "revenue" not in queued, queued
     assert queued.get("ebitda") == "1,600,000", queued
-    assert applied == 1, applied
+    assert queued.get("attrition_rate") == 5.0, queued
+    assert queued.get("loan_term") == 7, queued
+    assert applied == 3, applied
 
 
 def test_sqlite_store_crud():

@@ -27,6 +27,7 @@ from calculations import (
 from insights import (
     Insight, compute_all_insights, select_insight, verdict_from_insights,
     render_verdict_bar, _insight_returns, _insight_valuation,
+    irr_is_meaningful,
 )
 
 PASSED = 0
@@ -396,6 +397,22 @@ def test_irr_garbage_guard():
     ok("sane IRR 55.7% still clears", sane.severity == "positive")
 
 
+def test_irr_is_meaningful_gate():
+    """The shared gate every IRR *display* goes through.
+
+    Clamping only the scorer left four renderers printing the garbage: the
+    Key Return Metrics card showed a green "5-Year IRR = 286746111107328000.0%"
+    right next to the red strip calling it meaningless. Any surface that prints
+    an IRR must route through this.
+    """
+    print("\ntest_irr_is_meaningful_gate")
+    for bad in (None, float("nan"), float("inf"), float("-inf"),
+                1.7e10, 1e17, 3.14e17, 10.0, 10.5, -0.99, -5.0, "abc", "", [1]):
+        ok(f"rejects {bad!r:.14}", irr_is_meaningful(bad) is False)
+    for good in (0.0, 0.05, 0.222, 0.557, 9.99, -0.5):
+        ok(f"accepts {good!r}", irr_is_meaningful(good) is True)
+
+
 def test_deep_discount_skepticism():
     """A bid far under the band is a question, not a win (banker review)."""
     print("\ntest_deep_discount_skepticism")
@@ -419,5 +436,6 @@ if __name__ == "__main__":
     test_verdict_rules()
     test_select_contract()
     test_irr_garbage_guard()
+    test_irr_is_meaningful_gate()
     test_deep_discount_skepticism()
     print(f"\nAll {PASSED} assertions passed.")

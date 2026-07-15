@@ -5,7 +5,12 @@ Generates a summary PDF of the full acquisition analysis.
 
 from fpdf import FPDF
 import io
+import math
 from datetime import date
+
+# The one gate every IRR display routes through — including the legacy export
+# below, which quoted a 1.1e21 "IRR" into a downloadable PDF for two rounds.
+from insights import irr_is_meaningful
 
 
 class AnalysisPDF(FPDF):
@@ -91,10 +96,16 @@ def generate_pdf(purchase_price, multiples, eboc, pro_forma, returns,
     # Key Returns
     pdf.section_title("Buyer Return Metrics")
     for yr in [3, 5, 7]:
-        irr = returns.get(f"irr_yr{yr}", 0)
-        coc = returns.get(f"coc_yr{yr}", 0)
-        pdf.kv_row(f"Year {yr} IRR:", f"{irr*100:.1f}%")
-        pdf.kv_row(f"Year {yr} Cash-on-Cash:", f"{coc:.2f}x")
+        # Same gate as every other IRR surface. This one printed
+        # "Year 5 IRR: 1131149108065523728384.0%" into a downloadable PDF —
+        # and it survived two rounds of fixes because the key is COMPUTED
+        # (f"irr_yr{yr}"), so grepping for "irr_yr5" could never find it.
+        irr = returns.get(f"irr_yr{yr}")
+        coc = returns.get(f"coc_yr{yr}")
+        irr_txt = f"{irr*100:.1f}%" if irr_is_meaningful(irr) else "n/a"
+        coc_txt = f"{coc:.2f}x" if isinstance(coc, (int, float)) and math.isfinite(coc) else "n/a"
+        pdf.kv_row(f"Year {yr} IRR:", irr_txt)
+        pdf.kv_row(f"Year {yr} Cash-on-Cash:", coc_txt)
     pdf.kv_row("Breakeven Year:", str(returns["breakeven_year"]))
     pdf.kv_row("Total Cash Invested:", fmt_d(returns["total_cash_invested"]))
     pdf.ln(3)

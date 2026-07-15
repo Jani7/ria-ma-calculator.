@@ -2789,12 +2789,32 @@ with tab_returns:
 
     irr_table = sensitivity_irr(base_params, multiples_range, attrition_range)
 
+    # Mask cells where the Newton solver diverged (no sign change in the cash
+    # flows -> "IRRs" of 1e21). Two reasons this can't just be a text fix:
+    #
+    #  1. The number is meaningless, and this grid printed it — "7102650231
+    #     585600700416.0%" — the same defect the metric card had.
+    #  2. Worse, z feeds Plotly's AUTOSCALED colorscale. One garbage cell
+    #     stretched the range to -15 .. 7.1e21, collapsing every real cell to
+    #     colour position ~1e-20. The grid inverted: the genuine 62% IRR
+    #     winner rendered RED while the mathematically impossible cell
+    #     rendered GREEN. A reader would pick exactly the wrong deal.
+    #
+    # NaN keeps the cell out of the autoscale entirely and renders as a gap.
+    _irr_ok = np.array([[ins.irr_is_meaningful(v) for v in row]
+                        for row in irr_table.values])
+    _irr_z = np.where(_irr_ok, irr_table.values.astype(float) * 100, np.nan)
+    _irr_txt = [[f"{v*100:.1f}%" if ok else "n/a"
+                 for v, ok in zip(row, ok_row)]
+                for row, ok_row in zip(irr_table.values, _irr_ok)]
+    _n_masked = int((~_irr_ok).sum())
+
     fig_hm1 = go.Figure(go.Heatmap(
-        z=irr_table.values * 100,
+        z=_irr_z,
         x=[f"{a*100:.0f}%" for a in irr_table.columns],
         y=[f"{m:.1f}x" for m in irr_table.index],
         colorscale=[[0, "#fc8181"], [0.5, "#fefcbf"], [1, "#48bb78"]],
-        text=[[f"{v*100:.1f}%" for v in row] for row in irr_table.values],
+        text=_irr_txt,
         texttemplate="%{text}",
         textfont=dict(size=11),
         colorbar=dict(title="IRR %"),
@@ -2807,6 +2827,13 @@ with tab_returns:
         height=400,
     )
     st.plotly_chart(fig_hm1, use_container_width=True)
+    if _n_masked:
+        # Don't leave gaps unexplained — a blank cell reads as a bug otherwise.
+        st.caption(
+            f"{_n_masked} of {_irr_ok.size} cells show n/a: at those "
+            f"assumptions the deal never returns the buyer's equity, so a "
+            f"five-year IRR doesn't exist to plot."
+        )
 
     st.markdown('<div class="section-header">Breakeven Sensitivity: Growth Rate vs. Revenue Multiple</div>', unsafe_allow_html=True)
 

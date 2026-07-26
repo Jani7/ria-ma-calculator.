@@ -164,7 +164,7 @@ print("\n-- applied --------------------------------------------------------")
 at = fresh(
     sec_data=MEGA,
     pending_reconcile=False,
-    sec_applied=True,          # a SEC value really did reach the widgets
+    # the values below ARE the SEC ones, so the derived gate reads 'applied'
     aum=f"{int(MEGA.aum):,}",
     num_clients=f"{int(MEGA.num_clients):,}",
     revenue="2,400,000,000",
@@ -298,7 +298,7 @@ if _apply and _radios:
 # reading their (now absent) state raises on the next run — a harness
 # limitation, not app behaviour.
 print("\n-- taking a per-field offer earns the claim -------------------------")
-at = fresh(sec_data=MEGA, pending_reconcile=False, sec_applied=False,
+at = fresh(sec_data=MEGA, pending_reconcile=False,
            aum="500,000,000", revenue="4,000,000", ebitda="1,600,000",
            owner_comp="500,000", num_clients="200", purchase_price="8,000,000")
 at.run()
@@ -326,7 +326,7 @@ if _revert:
 # Paired with the negative assertions above. Without these, reverting a gate
 # AND rewording the caption would leave the negatives passing on absence.
 print("\n-- applied: positives ----------------------------------------------")
-at = fresh(sec_data=MEGA, sec_applied=True, pending_reconcile=False,
+at = fresh(sec_data=MEGA, pending_reconcile=False,
            aum=f"{int(MEGA.aum):,}", num_clients=f"{int(MEGA.num_clients):,}",
            revenue="2,400,000,000", ebitda="600,000,000",
            purchase_price="4,800,000,000")
@@ -348,7 +348,7 @@ ok("firm name DOES reach the memo once applied", firm_name_on_page(at))
 # hidden while the dialog is pending, so the one-field-at-a-time way out was
 # gone too. Applied state on the way in is what makes this test bite.
 print("\n-- second lookup in a session ---------------------------------------")
-at = fresh(sec_data=MEGA, pending_reconcile=True, sec_applied=False,
+at = fresh(sec_data=MEGA, pending_reconcile=True,
            aum=f"{int(MEGA.aum):,}",
            num_clients=f"{int(MEGA.num_clients):,}",   # comma string, as applied
            revenue="2,400,000,000", ebitda="600,000,000")
@@ -359,6 +359,63 @@ ok("Apply selected still renders on the second lookup",
    str([b.label for b in at.button][:8]))
 ok("Cancel still renders on the second lookup",
    any(b.label == "Cancel" for b in at.button))
+
+
+# =============================================================================
+# 6c. Provenance must not outlive the values it describes
+# =============================================================================
+# Found in review, and the third variant of the same mistake: approximating
+# "are the SEC values in the widgets?" with something cheaper. A flag set at
+# apply-time survived the user editing the applied value straight back out,
+# leaving a memo stamped with a firm whose numbers were gone. The gate is now
+# derived from the widgets on every render, so there is no flag to go stale.
+print("\n-- provenance does not outlive its values ---------------------------")
+at = fresh(sec_data=MEGA, pending_reconcile=False,
+           aum=f"{int(MEGA.aum):,}",              # applied from SEC
+           num_clients="200",                     # declined, user's own
+           revenue="2,400,000,000", ebitda="600,000,000")
+at.run()
+no_exception("applied-one-field state renders", at)
+ok("one applied field earns the claim", "SEC applied" in sidebar_text(at))
+ok("and the firm reaches the memo", firm_name_on_page(at))
+
+# Now the user overwrites the one field that came from SEC.
+at.session_state["aum"] = "750,000,000"
+at.run()
+no_exception("renders after the applied value is edited away", at)
+ok("editing the last SEC value away drops the claim",
+   "SEC applied" not in sidebar_text(at), sidebar_text(at)[:170])
+ok("and the firm leaves the memo", not firm_name_on_page(at))
+ok("and the mega-firm banner goes with it",
+   not any("above this calculator" in m.value for m in at.main.markdown))
+_decoded = decoded_share_state(at)
+ok("share link carries the user's number, not the SEC one",
+   _decoded is not None and _decoded.get("aum") == 750_000_000,
+   f"link aum={_decoded.get('aum') if _decoded else None}")
+
+
+# =============================================================================
+# 6d. A shared link opened into an already-applied session
+# =============================================================================
+# Same root cause, different door: apply_deal_from_url replaces every widget
+# with someone else's deal but leaves sec_data alone, so a latch would have
+# stamped THIS firm onto THAT deal.
+print("\n-- shared link over an applied session ------------------------------")
+at = fresh(sec_data=MEGA, pending_reconcile=False, aum=f"{int(MEGA.aum):,}")
+at.run()
+ok("session starts with the firm applied", "SEC applied" in sidebar_text(at))
+_url = sidebar_share_url(at)
+
+at2 = fresh(sec_data=MEGA, pending_reconcile=False, aum=f"{int(MEGA.aum):,}")
+at2.query_params["d"] = persistence.encode_deal_to_param(
+    {"aum": 42_000_000, "revenue": 300_000, "ebitda": 90_000})
+at2.run()
+no_exception("restoring a shared deal over an applied session renders", at2)
+ok("the shared deal's numbers win",
+   as_int(ss(at2, "aum", "0")) == 42_000_000, str(ss(at2, "aum")))
+ok("the previous firm does not stamp the shared deal",
+   "SEC applied" not in sidebar_text(at2), sidebar_text(at2)[:170])
+ok("and it does not reach the memo", not firm_name_on_page(at2))
 
 
 # =============================================================================
@@ -378,7 +435,6 @@ if _cancel:
     no_exception("cancel runs cleanly", at)
     ok("cancel drops the SEC record", ss(at, "sec_data") is None)
     ok("cancel drops the pending flag", ss(at, "pending_reconcile") is False)
-    ok("cancel clears the applied flag", ss(at, "sec_applied") is False)
     ok("cancel retires the search query", ss(at, "sec_search") == "")
     ok("cancel releases the re-open guard", ss(at, "last_loaded_crd") is None)
     # No second .run() here, unlike the Clear block above: re-running an

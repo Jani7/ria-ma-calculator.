@@ -561,73 +561,73 @@ def _parse_count(raw, default):
         return default
 
 
-# What each field holds before the user has touched it. A SEC value equal to
-# one of these is useless as evidence: "applied" and "untouched" look identical,
-# so counting it would claim provenance the instant a firm is looked up. That
-# is not hypothetical — negative AUM growth clamps to 0.0, which is exactly the
-# slider's default, so every firm with a flat or shrinking book would have
-# tripped it.
-_SEC_FIELD_DEFAULTS = {"aum": 0, "num_clients": 0, "revenue": 0,
-                       "rev_growth_pct": 0.0}
+# Provenance is recorded, not inferred. Each apply stores the CRD it came from
+# and the exact value it put into each field; the gate then asks whether any of
+# those values is STILL in its widget. Equality alone was not enough — it proves
+# a number matches, not that it came from this firm. Look up A and apply it,
+# then look up B and walk away: if B's client count happened to equal A's, the
+# memo started naming B while carrying A's economics.
+_SEC_PROV_CRD = "_sec_prov_crd"
+_SEC_PROV_VALUES = "_sec_prov_values"
 
 
-def _sec_expected_values(sec) -> dict:
-    """What each field would hold if its SEC value were applied.
+def _record_sec_applied(crd, values: dict) -> None:
+    """Remember what an apply actually put into the widgets, and for whom."""
+    if not values:
+        return
+    if st.session_state.get(_SEC_PROV_CRD) != crd:
+        st.session_state[_SEC_PROV_CRD] = crd
+        st.session_state[_SEC_PROV_VALUES] = {}
+    st.session_state[_SEC_PROV_VALUES] = {
+        **st.session_state.get(_SEC_PROV_VALUES, {}), **values}
 
-    Mirrors the reconcile dialog's own per-row derivations, so "is this the SEC
-    value?" is answered the same way it was offered.
-    """
-    if sec is None:
-        return {}
-    out = {"aum": int(sec.aum)}
-    if sec.num_clients and sec.num_clients > 0:
-        out["num_clients"] = int(sec.num_clients)
-    if sec.aum <= _REV_ESTIMATE_AUM_CAP:
-        out["revenue"] = int(sec.estimated_revenue)
-    if sec.growth_rate is not None:
-        out["rev_growth_pct"] = round(
-            max(0.0, min(_GROWTH_SLIDER_MAX, sec.growth_rate * 100)), 1)
-    return out
+
+def _clear_sec_applied() -> None:
+    st.session_state.pop(_SEC_PROV_CRD, None)
+    st.session_state.pop(_SEC_PROV_VALUES, None)
 
 
 def _sec_is_applied() -> bool:
     """Whether the app may claim this deal's numbers came from SEC filings.
 
     The gate behind the green chip, the mega-firm banner and the memo's firm
-    name. It is DERIVED — recomputed from the widgets every render — rather
-    than a flag set when the user applies. Three separate bugs came from
-    approximating this question instead of asking it:
+    name. Four earlier versions of this question were each wrong in a way a
+    reviewer had to find, so the reasoning is worth keeping:
 
-      * gating on "a firm was looked up" showed a firm over an empty deal;
-      * gating on "the dialog closed" showed a firm over the user's own
-        numbers, because declining every row closes the dialog too;
-      * gating on a flag set at apply-time survived the user editing the
-        applied value back out, and survived a shared ?d= link replacing the
-        whole deal — leaving a memo stamped with a firm whose numbers were
-        gone.
+      * "a firm was looked up" showed a firm over an empty deal;
+      * "the dialog closed" showed a firm over the user's own numbers, because
+        declining every row closes the dialog too;
+      * a flag set at apply time outlived the value it described — editing the
+        applied number away, or opening a shared ?d= link over the session,
+        left a memo stamped with a firm whose numbers were gone;
+      * comparing widgets against the firm's values proved equality rather than
+        origin, so one coincidental match (a shared client count between two
+        firms) misattributed the whole deal.
 
-    A latch cannot express "the SEC values are still in there", so this does
-    not use one. Matching a single field is enough: a user who auto-fills a
-    firm and then tunes one assumption is still modelling that firm.
+    So: recorded per CRD, re-checked against the widgets every render. A value
+    that was never applied cannot match, and a value that has been overwritten
+    stops matching. Matching a single field is enough — someone who auto-fills
+    a firm and then tunes one assumption is still modelling that firm.
     """
     sec = st.session_state.get("sec_data")
     if sec is None:
         return False
-    for key, expected in _sec_expected_values(sec).items():
+    if st.session_state.get(_SEC_PROV_CRD) != getattr(sec, "crd", None):
+        return False  # what we applied belongs to a different firm
+    for key, applied in (st.session_state.get(_SEC_PROV_VALUES) or {}).items():
         current = st.session_state.get(key)
         if current is None:
             continue
-        if expected == _SEC_FIELD_DEFAULTS.get(key):
-            continue  # indistinguishable from untouched — proves nothing
-        if key == "rev_growth_pct":
+        if isinstance(applied, float):
             try:
-                if abs(float(current) - float(expected)) < 0.05:
+                if abs(float(current) - applied) < 1e-9:
                     return True
             except (TypeError, ValueError):
                 continue
-        elif _parse_count(current, None) == expected:
+        elif _parse_count(current, None) == applied:
             return True
     return False
+
 
 # Per-session rate limit for SEC lookups. The bulk Form ADV data is itself
 # public (we just preprocess it), so this isn't about gating access — it's
@@ -1642,6 +1642,7 @@ if st.session_state.sec_data is not None:
     if st.sidebar.button("Clear SEC data", key="sec_clear_btn", use_container_width=True):
         st.session_state.sec_data = None
         st.session_state.pending_reconcile = False
+        _clear_sec_applied()
         # Retire the guard and the query together. Without the guard reset,
         # re-picking the same firm later is a no-op (its CRD still matches) and
         # the user must load some other firm to get back. But resetting the
@@ -1696,8 +1697,12 @@ def _sec_field_badge(field_key: str, sec_value, fmt_fn, label: str):
     if col2.button("↺", key=f"revert_{field_key}", help=f"Use SEC value for {label}"):
         if field_key in _CURRENCY_INPUT_KEYS or field_key in _COUNT_INPUT_KEYS:
             _queue_apply(field_key, f"{int(sec_value):,}")
+            _applied_value = int(sec_value)
         else:
             _queue_apply(field_key, sec_value)
+            _applied_value = sec_value
+        _record_sec_applied(getattr(st.session_state.sec_data, "crd", None),
+                            {field_key: _applied_value})
         st.rerun()
 
 
@@ -1855,12 +1860,15 @@ def _render_reconcile_dialog():
         if c1.button("Apply selected", type="primary", use_container_width=True):
             applied = 0
             applied_keys: set[str] = set()
+            applied_values: dict = {}
             for key, (choice, sec_value) in decisions.items():
                 if choice.startswith("SEC:"):
                     if key in ("aum", "revenue", "num_clients"):
                         _queue_apply(key, f"{int(sec_value):,}")
+                        applied_values[key] = int(sec_value)
                     else:
                         _queue_apply(key, sec_value)
+                        applied_values[key] = sec_value
                     applied += 1
                     applied_keys.add(key)
             # When the user accepts SEC revenue, auto-scale the purchase
@@ -1876,10 +1884,10 @@ def _render_reconcile_dialog():
                 )
                 _queue_apply("purchase_price", f"{int(2 * applied_revenue):,}")
             st.session_state.pending_reconcile = False
-            # Provenance is claimed on what actually reached the widgets, not
-            # on the dialog having closed. Answering "Keep mine" to every row
-            # applies nothing, and _sec_is_applied() reads that correctly off
-            # the widgets — there is no flag here to keep in step.
+            # Record what actually went in, and for which firm. Answering
+            # "Keep mine" to every row records nothing, so the dialog closing
+            # cannot by itself make the app claim a firm.
+            _record_sec_applied(getattr(sec, "crd", None), applied_values)
             if applied:
                 st.toast(
                     f"Applied {applied} SEC value{'s' if applied != 1 else ''}"
@@ -1895,6 +1903,7 @@ def _render_reconcile_dialog():
             # restores the sidebar to its pre-lookup shape.
             st.session_state.pending_reconcile = False
             st.session_state.sec_data = None
+            _clear_sec_applied()
             # Guard + query retired together, same reasoning as Clear above:
             # releasing the guard while the selectbox still holds this CRD
             # would re-trigger the lookup and reopen the dialog on the next run.

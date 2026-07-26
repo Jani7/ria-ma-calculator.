@@ -116,6 +116,20 @@ MEGA = FirmData(
 )
 
 
+def applied(sec, **values):
+    """Session keys representing a completed apply of `values` from `sec`.
+
+    Provenance is recorded at apply time, so seeding widget values alone is no
+    longer enough to make the app claim a firm — which is the point.
+    """
+    out = dict(values)
+    out["_sec_prov_crd"] = sec.crd
+    out["_sec_prov_values"] = {
+        k: int(str(v).replace(",", "")) if isinstance(v, str) else v
+        for k, v in values.items()}
+    return out
+
+
 def fresh(**session):
     at = AppTest.from_file(APP, default_timeout=180)
     at.session_state["show_calculator"] = True
@@ -162,13 +176,10 @@ ok("mega-firm banner withheld while pending",
 # =============================================================================
 print("\n-- applied --------------------------------------------------------")
 at = fresh(
-    sec_data=MEGA,
-    pending_reconcile=False,
-    # the values below ARE the SEC ones, so the derived gate reads 'applied'
-    aum=f"{int(MEGA.aum):,}",
-    num_clients=f"{int(MEGA.num_clients):,}",
-    revenue="2,400,000,000",
-    ebitda="600,000,000",
+    sec_data=MEGA, pending_reconcile=False,
+    **applied(MEGA, aum=f"{int(MEGA.aum):,}",
+              num_clients=f"{int(MEGA.num_clients):,}"),
+    revenue="2,400,000,000", ebitda="600,000,000",
     purchase_price="4,800,000,000",
 )
 at.run()
@@ -327,7 +338,8 @@ if _revert:
 # AND rewording the caption would leave the negatives passing on absence.
 print("\n-- applied: positives ----------------------------------------------")
 at = fresh(sec_data=MEGA, pending_reconcile=False,
-           aum=f"{int(MEGA.aum):,}", num_clients=f"{int(MEGA.num_clients):,}",
+           **applied(MEGA, aum=f"{int(MEGA.aum):,}",
+                     num_clients=f"{int(MEGA.num_clients):,}"),
            revenue="2,400,000,000", ebitda="600,000,000",
            purchase_price="4,800,000,000")
 at.run()
@@ -349,8 +361,8 @@ ok("firm name DOES reach the memo once applied", firm_name_on_page(at))
 # gone too. Applied state on the way in is what makes this test bite.
 print("\n-- second lookup in a session ---------------------------------------")
 at = fresh(sec_data=MEGA, pending_reconcile=True,
-           aum=f"{int(MEGA.aum):,}",
-           num_clients=f"{int(MEGA.num_clients):,}",   # comma string, as applied
+           **applied(MEGA, aum=f"{int(MEGA.aum):,}",
+                     num_clients=f"{int(MEGA.num_clients):,}"),
            revenue="2,400,000,000", ebitda="600,000,000")
 at.run()
 no_exception("dialog survives comma-formatted counts from a prior apply", at)
@@ -371,8 +383,8 @@ ok("Cancel still renders on the second lookup",
 # derived from the widgets on every render, so there is no flag to go stale.
 print("\n-- provenance does not outlive its values ---------------------------")
 at = fresh(sec_data=MEGA, pending_reconcile=False,
-           aum=f"{int(MEGA.aum):,}",              # applied from SEC
-           num_clients="200",                     # declined, user's own
+           **applied(MEGA, aum=f"{int(MEGA.aum):,}"),   # applied from SEC
+           num_clients="200",                           # declined, user's own
            revenue="2,400,000,000", ebitda="600,000,000")
 at.run()
 no_exception("applied-one-field state renders", at)
@@ -401,12 +413,13 @@ ok("share link carries the user's number, not the SEC one",
 # with someone else's deal but leaves sec_data alone, so a latch would have
 # stamped THIS firm onto THAT deal.
 print("\n-- shared link over an applied session ------------------------------")
-at = fresh(sec_data=MEGA, pending_reconcile=False, aum=f"{int(MEGA.aum):,}")
+at = fresh(sec_data=MEGA, pending_reconcile=False,
+           **applied(MEGA, aum=f"{int(MEGA.aum):,}"))
 at.run()
 ok("session starts with the firm applied", "SEC applied" in sidebar_text(at))
-_url = sidebar_share_url(at)
 
-at2 = fresh(sec_data=MEGA, pending_reconcile=False, aum=f"{int(MEGA.aum):,}")
+at2 = fresh(sec_data=MEGA, pending_reconcile=False,
+            **applied(MEGA, aum=f"{int(MEGA.aum):,}"))
 at2.query_params["d"] = persistence.encode_deal_to_param(
     {"aum": 42_000_000, "revenue": 300_000, "ebitda": 90_000})
 at2.run()
@@ -452,11 +465,64 @@ ok("it stays in the not-applied state", "not applied yet" in sidebar_text(at))
 ok("and its name stays off the memo", not firm_name_on_page(at))
 
 # The same firm, genuinely applied: AUM is non-zero, so it IS evidence.
-at = fresh(sec_data=SHRINKING, pending_reconcile=False, aum="800,000,000")
+at = fresh(sec_data=SHRINKING, pending_reconcile=False,
+           **applied(SHRINKING, aum="800,000,000"))
 at.run()
 no_exception("shrinking-firm applied state renders", at)
 ok("applying a real field still earns the claim",
    "SEC applied" in sidebar_text(at), sidebar_text(at)[:170])
+
+
+# =============================================================================
+# 6f. A number that merely EQUALS a firm's is not provenance
+# =============================================================================
+# Found in review. Comparing widgets against a firm's values proves equality,
+# not origin. Two paths: a user whose own number happens to match, and — the
+# sharper one — a second firm that shares a value with the first. Client counts
+# are the plausible collision.
+print("\n-- equality is not provenance --------------------------------------")
+
+# (a) the user's own numbers happen to match, with no apply at all
+at = fresh(sec_data=MEGA, pending_reconcile=False,
+           aum=f"{int(MEGA.aum):,}", num_clients=f"{int(MEGA.num_clients):,}")
+at.run()
+no_exception("coincidental-match session renders", at)
+ok("matching numbers alone do not claim the firm",
+   "SEC applied" not in sidebar_text(at), sidebar_text(at)[:170])
+ok("and the firm stays off the memo", not firm_name_on_page(at))
+
+# (b) firm A applied, then firm B looked up — B shares A's client count
+TWIN = FirmData(
+    crd=999002, firm_name="TWIN COUNT PARTNERS", aum=1_200_000_000.0,
+    num_clients=int(MEGA.num_clients),      # the collision
+    num_accounts=None, as_of_date="2026-04-30",
+    aum_prior_year=1_050_000_000.0, registration_type="sec",
+)
+at = fresh(sec_data=TWIN, pending_reconcile=True,
+           # widgets and the recorded apply both still belong to MEGA
+           **applied(MEGA, aum=f"{int(MEGA.aum):,}",
+                     num_clients=f"{int(MEGA.num_clients):,}"))
+at.run()
+no_exception("second firm sharing a value renders", at)
+ok("a shared client count does not transfer provenance to firm B",
+   "SEC applied" not in sidebar_text(at), sidebar_text(at)[:170])
+ok("firm B is shown as found, not applied", "not applied yet" in sidebar_text(at))
+ok("firm B's name does not reach the memo",
+   not any(TWIN.firm_name in m.value for m in at.main.markdown))
+
+# (c) same firm, but the only field that still matches is one the user never
+# applied. This is what separates "we recorded what we applied" from "these
+# numbers happen to equal the firm's": the client count below was typed by the
+# user and coincides, while the one genuinely applied value has been edited out.
+at = fresh(sec_data=MEGA, pending_reconcile=False,
+           **applied(MEGA, aum=f"{int(MEGA.aum):,}"),   # only AUM was applied
+           num_clients=f"{int(MEGA.num_clients):,}")    # coincides, never applied
+at.session_state["aum"] = "615,000,000"                 # the applied value, gone
+at.run()
+no_exception("coincidence-only session renders", at)
+ok("a coincidental match on a never-applied field is not provenance",
+   "SEC applied" not in sidebar_text(at), sidebar_text(at)[:170])
+ok("and it does not reach the memo either", not firm_name_on_page(at))
 
 
 # =============================================================================

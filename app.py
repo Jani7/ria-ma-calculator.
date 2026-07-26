@@ -20,6 +20,7 @@ from calculations import (
     lookup_comps_band,
 )
 import sec_lookup
+import adv_source
 import insights as ins
 from comps_editor import get_active_comps_df, render_comps_editor
 from memo_mode import render_memo_tab, MEMO_CSS
@@ -29,133 +30,60 @@ import html as _html
 import tempfile
 import threading
 import urllib.parse
-import urllib.request
-import urllib.error
 from pathlib import Path
 
 # Where the runtime-downloaded parquet lives. /tmp on Streamlit Cloud is
 # writable and persists for the container's lifetime (cold starts re-fetch).
 _ADV_CACHE_PATH = Path(tempfile.gettempdir()) / "ria_adv_cache" / "adv_current.parquet"
 
+# ETag of the bytes currently in _ADV_CACHE_PATH. Lets the periodic re-check be
+# a conditional GET that costs a 304 instead of re-downloading ~700KB.
+_ADV_ETAG_PATH = _ADV_CACHE_PATH.with_name("adv_current.etag")
+
 # Local dev fallback — gitignored, populated by scripts/build_adv_data.py.
 _ADV_LOCAL_PATH = Path(__file__).parent / "data" / "adv_current.parquet"
 
+# How often a long-lived container re-checks the data repo. The refresh
+# pipeline publishes monthly, so this only has to be frequent enough that
+# nobody has to reboot the app to make a new snapshot visible — previously
+# nothing short of a container cold start would do it. It also bounds how long
+# a transient failure sticks: without a TTL, one network blip during the first
+# lookup meant "SEC data unavailable" for the life of the container.
+_ADV_RECHECK_TTL_SEC = 900
 
-@st.cache_resource(show_spinner="Fetching SEC ADV data…")
-def _resolve_adv() -> dict:
-    """Resolve the parquet location, downloading from a private GitHub repo
-    if no local copy exists.
+# Resolution, download, validation and install all live in adv_source so they
+# can be tested headlessly — that path only ever executes in production, since
+# local dev short-circuits to the on-disk parquet. app.py keeps just the caching.
 
-    Returns a dict with:
-        "path":   Path | None      — the parquet file, or None if unavailable
-        "status": str               — short code for the UI to render (PAT-safe)
 
-    Resolution order:
-        1. Local dev file at data/adv_current.parquet (gitignored)
-        2. /tmp cache from a prior fetch in this container
-        3. Private GitHub repo at branch HEAD via the Contents API,
-           authenticated with secret ADV_DATA_TOKEN. Optional secrets:
-           ADV_DATA_REPO (default "Jani7/ria-ma-data"),
-           ADV_DATA_PATH (default "adv_current.parquet"),
-           ADV_DATA_REF  (default "main").
-        4. None — UI shows "data unavailable" caption.
+def _adv_secrets() -> dict:
+    """st.secrets as a plain dict, tolerating its total absence.
 
-    The status code is intentionally minimal (e.g. "http_403") — no token,
-    URL, or exception text is ever stored, so this dict is safe to log.
+    Missing secrets (or no secrets file at all) is the normal local case and
+    st.secrets raises rather than returning empty, so every read is guarded.
     """
-    def _is_valid_parquet(p: Path) -> bool:
-        """A parquet file starts and ends with the 4-byte 'PAR1' magic."""
+    out = {}
+    # Key list owned by adv_source, which is what consumes them — two copies
+    # would drift the first time a secret is added on one side only.
+    for key in adv_source.SECRET_KEYS:
         try:
-            with open(p, "rb") as f:
-                head = f.read(4)
-                f.seek(-4, 2)
-                tail = f.read(4)
-            return head == b"PAR1" and tail == b"PAR1"
-        except OSError:
-            return False
-
-    if _ADV_LOCAL_PATH.exists() and _is_valid_parquet(_ADV_LOCAL_PATH):
-        return {"path": _ADV_LOCAL_PATH, "status": "local"}
-    if _ADV_CACHE_PATH.exists():
-        if _is_valid_parquet(_ADV_CACHE_PATH):
-            return {"path": _ADV_CACHE_PATH, "status": "cache"}
-        # Stale/bad bytes from a prior failed fetch — discard and re-fetch.
-        try:
-            _ADV_CACHE_PATH.unlink()
-        except OSError:
-            pass
-
-    token = None
-    repo = "Jani7/ria-ma-data"
-    file_path = "adv_current.parquet"
-    ref = "main"
-    try:
-        if "ADV_DATA_TOKEN" in st.secrets:
-            token = st.secrets["ADV_DATA_TOKEN"]
-        if "ADV_DATA_REPO" in st.secrets:
-            repo = st.secrets["ADV_DATA_REPO"]
-        if "ADV_DATA_PATH" in st.secrets:
-            file_path = st.secrets["ADV_DATA_PATH"]
-        if "ADV_DATA_REF" in st.secrets:
-            ref = st.secrets["ADV_DATA_REF"]
-    except Exception:
-        # st.secrets may not be available in some local-dev contexts.
-        pass
-
-    # Validate operator-controlled secret strings before splicing them into
-    # the GitHub Contents API URL. These are *operator* values (set on
-    # Streamlit Cloud), not user input, so this isn't an SSRF mitigation —
-    # it's a footgun guard: a stray space or backslash in the secret would
-    # otherwise build a broken URL or, in a contrived case, redirect the
-    # fetch to a different repo/branch.
-    import re as _re
-    if not _re.fullmatch(r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}", repo):
-        return {"path": None, "status": "bad_config"}
-    if not _re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", file_path):
-        return {"path": None, "status": "bad_config"}
-    if not _re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", ref):
-        return {"path": None, "status": "bad_config"}
-
-    if not token:
-        return {"path": None, "status": "no_token"}
-
-    try:
-        # Contents API with Accept: application/vnd.github.raw returns the
-        # file bytes directly — no separate asset/blob download step.
-        api = f"https://api.github.com/repos/{repo}/contents/{file_path}?ref={ref}"
-        req = urllib.request.Request(
-            api,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github.raw",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "ria-ma-calculator",
-            },
-        )
-        _ADV_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            body = resp.read()
-        _ADV_CACHE_PATH.write_bytes(body)
-        # Verify we got a real parquet, not an HTML error page or JSON wrapper.
-        # Parquet starts and ends with the 4-byte "PAR1" magic.
-        if not (len(body) > 8 and body[:4] == b"PAR1" and body[-4:] == b"PAR1"):
-            return {"path": None, "status": "bad_response"}
-        return {"path": _ADV_CACHE_PATH, "status": "fetched"}
-    except urllib.error.HTTPError as e:
-        # Record only the HTTP status — no body, no headers, no URL.
-        return {"path": None, "status": f"http_{e.code}"}
-    except urllib.error.URLError:
-        return {"path": None, "status": "network_error"}
-    except OSError:
-        return {"path": None, "status": "io_error"}
-    except Exception:
-        # Catch-all so exotic exceptions don't bubble to Streamlit's error
-        # overlay (which would surface the private repo name from the f-string).
-        return {"path": None, "status": "unknown_error"}
+            if key in st.secrets:
+                out[key] = st.secrets[key]
+        except Exception:
+            break
+    return out
 
 
-def _ensure_adv_data_path():
-    return _resolve_adv()["path"]
+@st.cache_resource(ttl=_ADV_RECHECK_TTL_SEC, show_spinner="Fetching SEC ADV data…")
+def _resolve_adv() -> dict:
+    """Cached ADV resolution. See adv_source.resolve for the resolution order
+    and why the remote is consulted before the local cache."""
+    return adv_source.resolve(
+        local_path=_ADV_LOCAL_PATH,
+        cache_path=_ADV_CACHE_PATH,
+        etag_path=_ADV_ETAG_PATH,
+        secrets=_adv_secrets(),
+    )
 
 
 def _adv_resolution_status() -> str:
@@ -163,17 +91,30 @@ def _adv_resolution_status() -> str:
 
 
 @st.cache_data(show_spinner=False)
-def _load_adv_df_by_path(path_str: str):
-    """Cached by path string so the cache invalidates when the resolved
-    path changes (e.g. None → /tmp/... after a fix to the secret/PAT)."""
+def _load_adv_df_by_path(path_str: str, version: str):
+    """Cached by path AND content version.
+
+    Path alone was not enough: the refresh pipeline replaces the file at a
+    fixed path, so a new snapshot with an unchanged path kept serving the
+    previous dataframe for the life of the container. `version` is the
+    remote ETag (or mtime+size for the local dev file)."""
     if not path_str:
         return sec_lookup.load_adv_data(None)
     return sec_lookup.load_adv_data(Path(path_str))
 
 
 def _load_adv_df():
-    p = _ensure_adv_data_path()
-    return _load_adv_df_by_path(str(p) if p else "")
+    _r = _resolve_adv()
+    p = _r["path"]
+    return _load_adv_df_by_path(str(p) if p else "", _r.get("version", ""))
+
+
+def _adv_data_as_of(df) -> str:
+    return adv_source.data_as_of(df)
+
+
+def _fmt_data_as_of(iso_date: str) -> str:
+    return adv_source.fmt_data_as_of(iso_date)
 
 
 # Comps loading moved to comps_editor.get_active_comps_df() — mtime-keyed
@@ -599,10 +540,37 @@ if "sec_data" not in st.session_state:
     st.session_state.sec_data = None  # sec_lookup.FirmData or None
 if "pending_reconcile" not in st.session_state:
     st.session_state.pending_reconcile = False
+if "sec_applied" not in st.session_state:
+    # True once at least one SEC value has actually reached the input widgets.
+    # Distinct from `pending_reconcile` (the dialog's open/closed state) on
+    # purpose: the dialog closing is not evidence that anything was applied.
+    st.session_state.sec_applied = False
 if "pending_apply" not in st.session_state:
     st.session_state.pending_apply = {}  # {widget_key: value}
 if "sec_lookup_history" not in st.session_state:
     st.session_state.sec_lookup_history = []  # epoch seconds of past loads
+
+
+def _sec_is_applied() -> bool:
+    """Whether the app may claim this deal's numbers came from SEC filings.
+
+    The single gate behind every provenance surface — the green chip, the
+    per-field captions' framing, the mega-firm banner, and the memo's firm
+    name. It asks "are the SEC values in the widgets?", never "did the dialog
+    close?". Those came apart twice: once when the modal was dismissed by a
+    click outside it (no callback runs), and once when the user answered
+    "Keep mine" to every row, which closes the dialog having applied nothing.
+    """
+    return bool(st.session_state.get("sec_data") is not None
+                and st.session_state.get("sec_applied"))
+
+
+def _parse_count(raw, default: int) -> int:
+    """Read a count_input's session value, which is a comma-formatted string."""
+    try:
+        return int(float(str(raw).replace(",", "").replace("$", "").strip()))
+    except (ValueError, TypeError):
+        return default
 
 # Per-session rate limit for SEC lookups. The bulk Form ADV data is itself
 # public (we just preprocess it), so this isn't about gating access — it's
@@ -1500,6 +1468,11 @@ elif _query_clean:
                     _selected_crd, _adv_df
                 )
                 st.session_state.pending_reconcile = True
+                # A new firm carries no provenance until it is applied — and
+                # without this reset it would inherit the PREVIOUS firm's, so
+                # the chip and the memo would name firm B using firm A's
+                # numbers.
+                st.session_state.sec_applied = False
                 st.session_state.last_loaded_crd = _selected_crd
                 st.rerun()
             if not _allowed:
@@ -1512,12 +1485,20 @@ elif _query_clean:
                     f"{SEC_LOOKUP_WINDOW_SEC // 60} min (resets in {_wait_label})."
                 )
             else:
-                # Merged attribution + quota line — one caption is calmer
-                # than two stacked ones and conserves sidebar real estate.
+                # Merged attribution + freshness + quota line — one caption is
+                # calmer than three stacked ones and conserves sidebar real
+                # estate. The freshness stamp only appears on this branch
+                # because the dataframe is already loaded here; putting it on
+                # the always-rendered caption below would force every visitor
+                # to pay the parquet download on first paint, including the
+                # ones who never search.
+                _fresh = _fmt_data_as_of(_adv_data_as_of(_adv_df))
                 st.sidebar.caption(
                     f"Source: [SEC Form ADV](https://www.sec.gov/data-research/sec-markets-data/"
                     f"information-about-registered-investment-advisers-exempt-reporting-advisers) "
-                    f"(public) · {_remaining}/{SEC_LOOKUP_LIMIT} lookups left."
+                    f"(public)"
+                    + (f" · data as of {_fresh}" if _fresh else "")
+                    + f" · {_remaining}/{SEC_LOOKUP_LIMIT} lookups left."
                 )
                 _sec_source_caption_rendered = True
         else:
@@ -1544,39 +1525,81 @@ if not _sec_source_caption_rendered:
 if st.session_state.sec_data is not None:
     _sec = st.session_state.sec_data
     _as_of = f" · as of {_sec.as_of_date}" if _sec.as_of_date else ""
-    # Custom-styled chip so the loaded-firm state reads as a callout (not a
-    # caption lost between other captions).
-    st.sidebar.markdown(
-        f"""
-        <div style="background: rgba(74,222,128,0.06);
-                    border: 1px solid rgba(74,222,128,0.30);
-                    border-radius: 6px;
-                    padding: 8px 10px;
-                    margin: 4px 0 6px 0;
-                    font-size: 0.78rem;
-                    color: #c5cad6;
-                    line-height: 1.4;">
-            <span style="color:#4ade80; font-weight:600;">● SEC loaded</span><br>
-            <span style="color:#e5e9f0;">{_html.escape(_sec.firm_name)}</span>
-            <span style="color:#6b7385; font-size:0.72rem;">{_as_of}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    # "Report incorrect data" mailto. urllib.parse.quote handles ampersands,
-    # accents, etc. in firm names so the subject line stays well-formed.
-    _report_subject = urllib.parse.quote(
-        f"ADV data issue: {_sec.firm_name} (CRD {_sec.crd})"
-    )
-    st.sidebar.markdown(
-        f"<div style='font-size:0.72rem; margin: -2px 0 6px 0;'>"
-        f"<a href='mailto:dhruvjani7@gmail.com?subject={_report_subject}' "
-        f"style='color:#8b94a8;'>Report incorrect data</a></div>",
-        unsafe_allow_html=True,
-    )
+    if not _sec_is_applied():
+        # Nothing has reached the inputs yet. The dialog can also be dismissed
+        # by clicking outside it, which runs no callback and leaves this state
+        # standing — so the chip must not claim success. It used to render the
+        # green "SEC loaded" badge here while every widget still held its old
+        # value, and the share link (built from widget state) honestly encoded
+        # an empty deal: the user copied a link the UI told them was a firm.
+        st.sidebar.markdown(
+            f"""
+            <div style="background: rgba(251,191,36,0.06);
+                        border: 1px solid rgba(251,191,36,0.30);
+                        border-radius: 6px;
+                        padding: 8px 10px;
+                        margin: 4px 0 6px 0;
+                        font-size: 0.78rem;
+                        color: #c5cad6;
+                        line-height: 1.4;">
+                <span style="color:#fbbf24; font-weight:600;">◐ Found — not applied yet</span><br>
+                <span style="color:#e5e9f0;">{_html.escape(_sec.firm_name)}</span>
+                <span style="color:#6b7385; font-size:0.72rem;">{_as_of}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.sidebar.button("Review & apply SEC values", key="sec_review_btn",
+                             type="primary", use_container_width=True):
+            # Re-arm the dialog. It is already pending after a stray click
+            # outside the modal, but not after the user declined every row —
+            # and that second case is exactly when someone needs a way back.
+            st.session_state.pending_reconcile = True
+            st.rerun()
+    else:
+        # Custom-styled chip so the loaded-firm state reads as a callout (not a
+        # caption lost between other captions).
+        st.sidebar.markdown(
+            f"""
+            <div style="background: rgba(74,222,128,0.06);
+                        border: 1px solid rgba(74,222,128,0.30);
+                        border-radius: 6px;
+                        padding: 8px 10px;
+                        margin: 4px 0 6px 0;
+                        font-size: 0.78rem;
+                        color: #c5cad6;
+                        line-height: 1.4;">
+                <span style="color:#4ade80; font-weight:600;">● SEC applied</span><br>
+                <span style="color:#e5e9f0;">{_html.escape(_sec.firm_name)}</span>
+                <span style="color:#6b7385; font-size:0.72rem;">{_as_of}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        # "Report incorrect data" mailto. urllib.parse.quote handles ampersands,
+        # accents, etc. in firm names so the subject line stays well-formed.
+        _report_subject = urllib.parse.quote(
+            f"ADV data issue: {_sec.firm_name} (CRD {_sec.crd})"
+        )
+        st.sidebar.markdown(
+            f"<div style='font-size:0.72rem; margin: -2px 0 6px 0;'>"
+            f"<a href='mailto:dhruvjani7@gmail.com?subject={_report_subject}' "
+            f"style='color:#8b94a8;'>Report incorrect data</a></div>",
+            unsafe_allow_html=True,
+        )
     if st.sidebar.button("Clear SEC data", key="sec_clear_btn", use_container_width=True):
         st.session_state.sec_data = None
         st.session_state.pending_reconcile = False
+        st.session_state.sec_applied = False
+        # Retire the guard and the query together. Without the guard reset,
+        # re-picking the same firm later is a no-op (its CRD still matches) and
+        # the user must load some other firm to get back. But resetting the
+        # guard ALONE re-fires the auto-lookup on the very next run — the
+        # selectbox still holds this CRD — reopening the dialog just dismissed
+        # and spending another lookup from the rate-limit budget. Clearing the
+        # query retires the selectbox, which is what makes the reset safe.
+        st.session_state.last_loaded_crd = None
+        _queue_apply("sec_search", "")
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -1605,8 +1628,17 @@ def _sec_field_badge(field_key: str, sec_value, fmt_fn, label: str):
     Currency inputs need the queued value to be a comma-formatted string;
     number_input and slider inputs need their native types. Mismatching
     these types crashes the widget on the next rerun with a TypeError on
-    `text_input_proto.value = widget_state.value`."""
+    `text_input_proto.value = widget_state.value`.
+
+    Silent while the dialog is open: a "SEC: $326,285,243,393" caption under an
+    input still showing $0 competes with the modal for the same decision. Once
+    the dialog is closed these render again even if nothing was applied — they
+    are an OFFER ("SEC says X, click ↺ to take it"), not a claim, and the amber
+    chip above says plainly that nothing has been applied. They are also the
+    per-field way in when someone declined a row and then changed their mind."""
     if st.session_state.sec_data is None or sec_value is None:
+        return
+    if st.session_state.pending_reconcile:
         return
     col1, col2 = st.sidebar.columns([3, 1])
     col1.caption(f"SEC: {fmt_fn(sec_value)}")
@@ -1615,6 +1647,9 @@ def _sec_field_badge(field_key: str, sec_value, fmt_fn, label: str):
             _queue_apply(field_key, f"{int(sec_value):,}")
         else:
             _queue_apply(field_key, sec_value)
+        # A SEC value is now genuinely in the widgets, so the provenance
+        # surfaces have earned the right to say so.
+        st.session_state.sec_applied = True
         st.rerun()
 
 
@@ -1732,7 +1767,11 @@ def _render_reconcile_dialog():
 
         if sec.num_clients and sec.num_clients > 0:
             _row("num_clients", "Number of Clients",
-                 f"{int(st.session_state.get('num_clients', 200)):,}",
+                 # num_clients is a count_input: its session value is the
+                 # comma-formatted string this dialog's own Apply path writes
+                 # ("322,130"). int() on that raises, which killed the dialog
+                 # on every lookup after the first.
+                 f"{_parse_count(st.session_state.get('num_clients', 200), 200):,}",
                  int(sec.num_clients), f"{int(sec.num_clients):,}")
 
         if sec.aum > _REV_ESTIMATE_AUM_CAP:
@@ -1791,7 +1830,14 @@ def _render_reconcile_dialog():
                 )
                 _queue_apply("purchase_price", f"{int(2 * applied_revenue):,}")
             st.session_state.pending_reconcile = False
+            # Provenance is claimed on what actually reached the widgets, not
+            # on the dialog having closed. Answer "Keep mine" to every row and
+            # `applied` is 0: the numbers are still the user's, so the green
+            # chip, the mega-firm banner and the memo's firm name must stay
+            # off. Gating those on `not pending_reconcile` instead reproduced
+            # the very bug this flow was fixed for, one door further along.
             if applied:
+                st.session_state.sec_applied = True
                 st.toast(
                     f"Applied {applied} SEC value{'s' if applied != 1 else ''}"
                     + (" + auto-scaled purchase price (2× revenue)." if "revenue" in applied_keys else "."),
@@ -1806,6 +1852,12 @@ def _render_reconcile_dialog():
             # restores the sidebar to its pre-lookup shape.
             st.session_state.pending_reconcile = False
             st.session_state.sec_data = None
+            st.session_state.sec_applied = False
+            # Guard + query retired together, same reasoning as Clear above:
+            # releasing the guard while the selectbox still holds this CRD
+            # would re-trigger the lookup and reopen the dialog on the next run.
+            st.session_state.last_loaded_crd = None
+            _queue_apply("sec_search", "")
             st.rerun()
 
     _dlg()
@@ -2227,7 +2279,7 @@ with _hdr_right:
 # purchase price either — the analytics below would render as ~0 against
 # the default $8M. Custom .mega-banner (vs st.warning's loud yellow block)
 # is prominent without being alarmist.
-if st.session_state.sec_data is not None and st.session_state.sec_data.aum > 10e9:
+if _sec_is_applied() and st.session_state.sec_data.aum > 10e9:
     _mega = st.session_state.sec_data
     st.markdown(
         f"""
@@ -3307,8 +3359,12 @@ with tab_memo:
         pct_self_funded=pct_self_funded,
     )
     _memo_extras = dict(
+        # Only stamp the firm on the memo once its numbers are actually in the
+        # model. Until then the inputs are still the user's (or zeros), and a
+        # memo headed with a firm name it doesn't describe is the one artifact
+        # that must never lie.
         firm_name=(st.session_state.sec_data.firm_name
-                   if st.session_state.sec_data is not None else None),
+                   if _sec_is_applied() else None),
         suggested_deal=suggested_deal,
         structure_actual=dict(
             upfront=pct_upfront_cash, note=pct_seller_note,

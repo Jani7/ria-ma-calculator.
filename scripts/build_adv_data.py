@@ -21,6 +21,17 @@ bulk state-registered feed becomes available later, extend `STATE_SOURCES`.
 
 Run quarterly. ~5MB per snapshot, ~3-5MB output.
 
+Alongside the Parquet this writes a provenance sidecar,
+`adv_current.manifest.json` (override with --manifest). Nothing inside the
+Parquet records WHICH two SEC snapshots produced it, and that gap is the one
+thing the artifact cannot be audited for after the fact: `aum_prior_year` is
+rendered by the app as a year-over-year growth rate, so if the SEC prunes the
+12-15-month-old files off its listing page, `discover_snapshots` silently
+settles for a 24-month-old snapshot and every "YoY" number in the UI quietly
+becomes a two-year number. Row counts, coverage and totals all stay plausible.
+The sidecar is what makes that detectable; `validate_adv_data.py --manifest`
+is what gates on it.
+
 Schema mapping (Form ADV Part 1A -> our columns):
     Organization CRD#       -> crd
     Primary Business Name   -> firm_name  (falls back to Legal Name)
@@ -34,12 +45,13 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import re
 import sys
 import urllib.parse
 import urllib.request
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -78,6 +90,22 @@ ITEM_5_COLUMNS = ["5F(2)(c)", "5C(1)", "5F(2)(f)"]
 
 OUT_PATH = Path(__file__).parent.parent / "data" / "adv_current.parquet"
 
+# --- Provenance sidecar ------------------------------------------------------
+# Bump when the manifest's own key set changes; validate_adv_data.py pins this
+# number and FAILs on anything it does not recognize, so the two move together.
+MANIFEST_SCHEMA_VERSION = 1
+# adv_current.parquet -> adv_current.manifest.json
+MANIFEST_SUFFIX = ".manifest.json"
+
+# What happened to the exempt-reporter roster on this run. The download failure
+# is swallowed on purpose (an exempt outage should not block a refresh of the
+# 16K SEC registrants) --- but "swallowed" must not mean "unrecorded", because
+# losing the roster silently changes the population the app searches over.
+EXEMPT_INCLUDED = "included"
+EXEMPT_SKIPPED_BY_FLAG = "skipped_by_flag"       # operator passed --no-exempt
+EXEMPT_MISSING_FROM_LISTING = "missing_from_listing"  # no -exempt href that month
+EXEMPT_DOWNLOAD_FAILED = "download_failed"       # the bare-except path below
+
 
 def _http_get(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -109,6 +137,30 @@ def _parse_mmddyy(s: str) -> datetime | None:
         return datetime(year, mm, dd)
     except ValueError:
         return None
+
+
+def snapshot_date_from_url(url: str | None) -> datetime | None:
+    """Recover the snapshot month from any ia<MMDDYY> URL, discovered or
+    hand-passed via --current-url/--prior-url. None if the URL does not carry a
+    parseable filename, in which case the manifest records the date as null and
+    the validator refuses to certify the gap."""
+    if not url:
+        return None
+    match = _FILENAME_RE.search(url)
+    if not match:
+        return None
+    return _parse_mmddyy(match.group("date"))
+
+
+def months_between(earlier: datetime, later: datetime) -> int:
+    """Whole calendar months from `earlier` to `later`, day-of-month ignored.
+
+    SEC snapshots are monthly and their day-of-month wanders (ia043026 vs
+    ia050125), so counting (year, month) steps is the stable measure. The
+    validator recomputes this identically and tolerates +/-1 month, which
+    absorbs the day drift this deliberately throws away.
+    """
+    return (later.year - earlier.year) * 12 + (later.month - earlier.month)
 
 
 def discover_snapshots(
@@ -246,6 +298,72 @@ def load_snapshot(url: str, registration_type: str) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def manifest_path_for(out_path: Path) -> Path:
+    """Default sidecar path: <out>.parquet -> <out>.manifest.json, same dir."""
+    return out_path.with_name(out_path.stem + MANIFEST_SUFFIX)
+
+
+def build_manifest(
+    *,
+    out_path: Path,
+    current_url: str,
+    prior_url: str,
+    current_exempt_url: str | None,
+    current_date: datetime | None,
+    prior_date: datetime | None,
+    exempt_status: str,
+    exempt_error: str | None,
+    frame: pd.DataFrame,
+) -> dict:
+    """Assemble the provenance record for one build. Pure -- no I/O."""
+    gap = (
+        months_between(prior_date, current_date)
+        if current_date is not None and prior_date is not None
+        else None
+    )
+    gap_days = (
+        (current_date - prior_date).days
+        if current_date is not None and prior_date is not None
+        else None
+    )
+    aum = pd.to_numeric(frame["aum"], errors="coerce").dropna()
+    return {
+        "manifest_schema_version": MANIFEST_SCHEMA_VERSION,
+        "built_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "parquet_path": str(out_path),
+        # The two snapshots this artifact is made of. `aum_prior_year` is the
+        # prior one; the app divides by it and calls the result year-over-year.
+        "current_snapshot_date": current_date.date().isoformat() if current_date else None,
+        "prior_snapshot_date": prior_date.date().isoformat() if prior_date else None,
+        "snapshot_gap_months": gap,
+        "snapshot_gap_days": gap_days,
+        "exempt_status": exempt_status,
+        "exempt_error": exempt_error,
+        "source_urls": {
+            "current": current_url,
+            "prior": prior_url,
+            "current_exempt": current_exempt_url,
+            "listing": LISTING_URL,
+        },
+        "row_count": int(len(frame)),
+        "total_aum": float(aum.sum()) if not aum.empty else 0.0,
+        "registration_type_counts": {
+            str(k): int(v)
+            for k, v in frame["registration_type"].value_counts(dropna=False).items()
+        },
+    }
+
+
+def write_manifest(path: Path, payload: dict) -> None:
+    """Write the sidecar via tmp-then-replace, so an interrupted run leaves
+    either the previous manifest or the new one --- never half a JSON object
+    that the validator would have to guess about."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -269,6 +387,14 @@ def main() -> int:
         help="Skip the exempt-reporter snapshot entirely.",
     )
     parser.add_argument("--out", default=str(OUT_PATH))
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "Path for the provenance sidecar JSON "
+            "(default: <out> with a .manifest.json suffix)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.current_url and args.prior_url:
@@ -299,6 +425,24 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+    # Recover the snapshot months from the URLs actually used, whether they came
+    # from discovery or from --current-url/--prior-url. This is the gap the
+    # manifest certifies and the validator gates on.
+    current_date = snapshot_date_from_url(current_url)
+    prior_date = snapshot_date_from_url(prior_url)
+    if current_date is not None and prior_date is not None:
+        print(
+            f"  gap:    {months_between(prior_date, current_date)} months "
+            f"({prior_date.date()} -> {current_date.date()})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "WARN: could not parse a snapshot month out of the URLs; the "
+            "manifest will record an unverifiable gap.",
+            file=sys.stderr,
+        )
+
     sec_current = load_snapshot(current_url, registration_type="sec")
     sec_prior = load_snapshot(prior_url, registration_type="sec")[["crd", "aum"]].rename(
         columns={"aum": "aum_prior_year"}
@@ -307,12 +451,22 @@ def main() -> int:
     sec_current = sec_current.merge(sec_prior, on="crd", how="left")
 
     frames = [sec_current]
-    if current_exempt_url and not args.no_exempt:
+    exempt_error: str | None = None
+    if args.no_exempt:
+        exempt_status = EXEMPT_SKIPPED_BY_FLAG
+    elif not current_exempt_url:
+        exempt_status = EXEMPT_MISSING_FROM_LISTING
+    else:
         try:
             exempt = load_snapshot(current_exempt_url, registration_type="exempt")
             exempt["aum_prior_year"] = pd.NA  # exempt rosters lack item 5
             frames.append(exempt)
+            exempt_status = EXEMPT_INCLUDED
         except Exception as exc:  # noqa: BLE001
+            # Non-fatal by design, but recorded: the published file now covers a
+            # smaller universe than the last one, and only the manifest says so.
+            exempt_status = EXEMPT_DOWNLOAD_FAILED
+            exempt_error = repr(exc)
             print(
                 f"WARN: exempt snapshot failed ({exc!r}); continuing with SEC only.",
                 file=sys.stderr,
@@ -352,6 +506,43 @@ def main() -> int:
         f"by type: {by_type}",
         file=sys.stderr,
     )
+
+    # Sidecar last, on purpose: the Parquet is already durable on disk before
+    # anything here can raise, so a manifest problem can never cost us the
+    # artifact. It also cannot be a Parquet column --- these values are constant
+    # across all ~16K rows, and a column would be pure duplication.
+    manifest_path = (
+        Path(args.manifest) if args.manifest else manifest_path_for(out_path)
+    )
+    try:
+        manifest = build_manifest(
+            out_path=out_path,
+            current_url=current_url,
+            prior_url=prior_url,
+            current_exempt_url=current_exempt_url,
+            current_date=current_date,
+            prior_date=prior_date,
+            exempt_status=exempt_status,
+            exempt_error=exempt_error,
+            frame=merged,
+        )
+        write_manifest(manifest_path, manifest)
+        print(
+            f"Wrote provenance manifest to {manifest_path} "
+            f"(gap {manifest['snapshot_gap_months']} months, "
+            f"exempt: {manifest['exempt_status']})",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Exit 0 anyway: the Parquet is good and re-running the build would cost
+        # another ~10MB of SEC downloads. Publication is still gated, because
+        # validate_adv_data.py --manifest FAILs on a manifest it cannot read.
+        print(
+            f"WARN: failed to write the provenance manifest ({exc!r}); "
+            f"{out_path} is intact but unprovenanced and validate_adv_data.py "
+            f"--manifest will refuse to publish it.",
+            file=sys.stderr,
+        )
     return 0
 
 

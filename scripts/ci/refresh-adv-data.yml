@@ -1,0 +1,147 @@
+# SEC ADV monthly refresh — INSTALL THIS IN THE PRIVATE DATA REPO.
+#
+#   Jani7/ria-ma-data  ->  .github/workflows/refresh-adv-data.yml
+#
+# It deliberately does NOT live in the public calculator repo. Running it here
+# would mean putting a write-scoped PAT into a public repo's secrets; running it
+# in ria-ma-data lets the built-in GITHUB_TOKEN commit to its own repo, so the
+# pipeline needs no new credential at all. The build/validate scripts are pulled
+# from the public repo at run time, so there is still a single source of truth
+# for them.
+#
+# What it does, once a month:
+#   1. checks out the data repo (for the current parquet, used as the prior
+#      artifact in the delta checks) and the public calculator repo (scripts)
+#   2. rebuilds the parquet from the SEC bulk snapshot
+#   3. VALIDATES it and fails the job on bad data — a malformed SEC file must
+#      never reach production. Nothing is committed unless this passes.
+#   4. commits only if the bytes actually changed
+#
+# A failure leaves the last-known-good parquet in place and notifies via the
+# normal GitHub Actions failure email/UI.
+
+name: Refresh SEC ADV snapshot
+
+on:
+  schedule:
+    # 09:00 UTC on the 8th. The SEC posts the monthly bulk file in the first
+    # week; a week of slack keeps the job off the publication race.
+    - cron: "0 9 8 * *"
+  workflow_dispatch:
+    inputs:
+      as_of_expected:
+        description: "Expected snapshot month (YYYY-MM-DD). Tightens the freshness gate; leave blank to accept any recent snapshot."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: adv-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out data repo
+        uses: actions/checkout@v4
+        with:
+          path: data-repo
+
+      - name: Check out calculator repo (build + validation scripts)
+        uses: actions/checkout@v4
+        with:
+          # The trailing period is part of the repository's actual name — the
+          # GitHub API reports "full_name": "Jani7/ria-ma-calculator.". It reads
+          # like a typo and has been "corrected" by a reviewer before; removing
+          # it points this step at a repository that does not exist.
+          repository: Jani7/ria-ma-calculator.
+          path: app-repo
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet pandas pyarrow numpy openpyxl
+
+      - name: Keep the current artifact as the comparison baseline
+        id: baseline
+        run: |
+          if [ -f data-repo/adv_current.parquet ]; then
+            cp data-repo/adv_current.parquet "$RUNNER_TEMP/prior.parquet"
+            echo "has_prior=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_prior=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No existing parquet — skipping month-over-month delta checks on this run."
+          fi
+
+      - name: Build snapshot from SEC bulk data
+        run: |
+          python app-repo/scripts/build_adv_data.py \
+            --out "$RUNNER_TEMP/adv_current.parquet" \
+            --manifest "$RUNNER_TEMP/adv_current.manifest.json"
+
+      - name: Validate — the gate that must fail on bad data
+        # The dispatch input reaches the shell through the environment, never
+        # through ${{ }} interpolation into the script body. Interpolated, a
+        # free-text input is executed as shell source in a job that holds
+        # contents:write and a token persisted in data-repo/.git/config.
+        env:
+          AS_OF: ${{ inputs.as_of_expected }}
+          HAS_PRIOR: ${{ steps.baseline.outputs.has_prior }}
+        run: |
+          ARGS=(--new "$RUNNER_TEMP/adv_current.parquet"
+                --manifest "$RUNNER_TEMP/adv_current.manifest.json"
+                --json "$RUNNER_TEMP/validation.json")
+          if [ "$HAS_PRIOR" = "true" ]; then
+            ARGS+=(--prior "$RUNNER_TEMP/prior.parquet")
+          fi
+          if [ -n "$AS_OF" ]; then
+            ARGS+=(--as-of "$AS_OF")
+          fi
+          python app-repo/scripts/validate_adv_data.py "${ARGS[@]}"
+
+      - name: Publish validation report to the run summary
+        if: always()
+        run: |
+          {
+            echo "### SEC ADV refresh"
+            echo '```json'
+            cat "$RUNNER_TEMP/validation.json" 2>/dev/null || echo "no report produced"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # success() is the implicit default, but it is spelled out because the
+      # step above it runs with `if: always()`, and "does a step that always
+      # runs re-open the gate for the ones after it?" is not a question worth
+      # leaving to a reader's memory of Actions semantics. Publishing data the
+      # validator rejected is the one outcome this pipeline must never have.
+      - name: Commit if the snapshot actually changed
+        if: success()
+        working-directory: data-repo
+        run: |
+          cp "$RUNNER_TEMP/adv_current.parquet" adv_current.parquet
+          cp "$RUNNER_TEMP/adv_current.manifest.json" adv_current.manifest.json
+          git config user.name  "adv-refresh-bot"
+          git config user.email "adv-refresh-bot@users.noreply.github.com"
+          # Stage FIRST, then diff the index. `git diff` against the worktree
+          # reports no change for an untracked path and exits 0, so the
+          # bootstrap run — the one where the data repo has no parquet yet,
+          # which the baseline step above explicitly expects — would report
+          # success having published nothing, and would keep doing so forever.
+          git add -A -- adv_current.parquet adv_current.manifest.json
+          if git diff --cached --quiet; then
+            echo "Snapshot unchanged — nothing to commit."
+            exit 0
+          fi
+          git commit -m "Refresh ADV snapshot $(date -u +%Y-%m)"
+          git push
+
+      # The running app re-checks the data repo every 15 minutes via a
+      # conditional GET (see _resolve_adv in app.py), so a successful push is
+      # live without a redeploy or container restart.

@@ -194,11 +194,20 @@ def resolve(*, local_path, cache_path, etag_path, secrets, opener=None) -> dict:
     file_path = str(secrets.get("ADV_DATA_PATH") or DEFAULT_FILE)
     ref = str(secrets.get("ADV_DATA_REF") or DEFAULT_REF)
 
+    # Credential and config problems degrade the same way network failures do.
+    # These used to return path=None directly, which was survivable when this
+    # function ran once per container: a cold start either worked or the app
+    # had never had data anyway. Under the re-check TTL it is not — the
+    # function now re-runs every 15 minutes against a container that already
+    # holds a good snapshot, so one transient st.secrets read (the reader
+    # below gives up quietly on any exception) would take every SEC lookup
+    # down while a perfectly good parquet sat in /tmp. The token gates
+    # FETCHING, never reading what was already fetched and validated.
     if not (_REPO_RE.fullmatch(repo) and _PATH_RE.fullmatch(file_path)
             and _REF_RE.fullmatch(ref)):
-        return {"path": None, "status": "bad_config", "version": ""}
+        return fall_back("bad_config")
     if not token:
-        return {"path": None, "status": "no_token", "version": ""}
+        return fall_back("no_token")
 
     tmp_path = None
     try:

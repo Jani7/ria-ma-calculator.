@@ -272,6 +272,36 @@ with TemporaryDirectory() as tmp:
 
 
 # =============================================================================
+print("\n-- credentials vanish while a good cache exists ----------------------")
+# Found in review. These preflight failures used to return path=None directly,
+# which was survivable when resolve() ran once per container. Under the
+# re-check TTL it re-runs every 15 minutes against a container that already
+# holds a good snapshot — so a single transient st.secrets read would take
+# every SEC lookup down while a perfectly good parquet sat on disk. The token
+# gates fetching, never reading what was already fetched and validated.
+with TemporaryDirectory() as tmp:
+    p = paths(tmp)
+    good = make_parquet(Path(tmp) / "good.parquet", rows=7)
+    adv_source.resolve(**p, secrets=GOOD_SECRETS,
+                       opener=opener_returning(good, '"etag-good"'))
+
+    for label, sec in [
+        ("token disappears", {}),
+        ("secrets read returns nothing", {"ADV_DATA_TOKEN": ""}),
+        ("repo misconfigured", {"ADV_DATA_TOKEN": "t", "ADV_DATA_REPO": "owner repo"}),
+        ("ref misconfigured", {"ADV_DATA_TOKEN": "t", "ADV_DATA_REF": "main branch"}),
+    ]:
+        r = adv_source.resolve(**p, secrets=sec, opener=opener_raising(
+            AssertionError("must not reach the network")))
+        ok(f"{label}: keeps serving the cached snapshot",
+           r["status"] == "cache" and r["path"] == p["cache_path"], str(r))
+        # Guarded: on regression r["path"] is None, and read_parquet(None)
+        # would abort the file and hide every assertion after this one.
+        ok(f"{label}: the data is still usable",
+           r["path"] is not None and len(pd.read_parquet(r["path"])) == 7,
+           f"path={r['path']}")
+
+
 print("\n-- config guards ----------------------------------------------------")
 with TemporaryDirectory() as tmp:
     p = paths(tmp)

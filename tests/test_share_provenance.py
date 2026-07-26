@@ -419,6 +419,47 @@ ok("and it does not reach the memo", not firm_name_on_page(at2))
 
 
 # =============================================================================
+# 6e. A firm whose SEC values coincide with the untouched defaults
+# =============================================================================
+# Negative AUM growth clamps to 0.0, which is exactly the growth slider's
+# default — so for every firm with a flat or shrinking book, "applied" and
+# "never touched" look identical on that field. Counting it as evidence
+# resurrected the original bug for a large slice of real firms.
+print("\n-- SEC values that collide with defaults ----------------------------")
+SHRINKING = FirmData(
+    crd=999001, firm_name="SHRINKING ADVISORS", aum=800_000_000.0,
+    num_clients=1200, num_accounts=None, as_of_date="2026-04-30",
+    aum_prior_year=920_000_000.0,      # declining -> growth clamps to 0.0
+    registration_type="sec",
+)
+ok("setup: this firm's growth really does clamp to zero",
+   SHRINKING.growth_rate is not None and SHRINKING.growth_rate < 0)
+
+at = fresh(sec_data=SHRINKING, pending_reconcile=True)
+at.run()
+no_exception("shrinking-firm lookup renders", at)
+# A SECOND run is what makes this bite. The chip renders above the growth
+# slider, so on the first pass rev_growth_pct is not in session state yet and
+# the comparison is skipped for a reason that has nothing to do with the fix.
+# Every real interaction is a rerun, where the key exists and holds 0.0.
+at.run()
+no_exception("shrinking-firm rerun renders", at)
+ok("setup: the rerun really does have the default in session state",
+   ss(at, "rev_growth_pct") == 0.0, str(ss(at, "rev_growth_pct")))
+ok("a zero-growth firm does not claim provenance on lookup",
+   "SEC applied" not in sidebar_text(at), sidebar_text(at)[:170])
+ok("it stays in the not-applied state", "not applied yet" in sidebar_text(at))
+ok("and its name stays off the memo", not firm_name_on_page(at))
+
+# The same firm, genuinely applied: AUM is non-zero, so it IS evidence.
+at = fresh(sec_data=SHRINKING, pending_reconcile=False, aum="800,000,000")
+at.run()
+no_exception("shrinking-firm applied state renders", at)
+ok("applying a real field still earns the claim",
+   "SEC applied" in sidebar_text(at), sidebar_text(at)[:170])
+
+
+# =============================================================================
 # 7. Cancel resets the same guards as Clear
 # =============================================================================
 # Cancel was a copy of the Clear path with no test of its own: stripping its

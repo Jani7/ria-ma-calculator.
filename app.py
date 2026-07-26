@@ -561,6 +561,16 @@ def _parse_count(raw, default):
         return default
 
 
+# What each field holds before the user has touched it. A SEC value equal to
+# one of these is useless as evidence: "applied" and "untouched" look identical,
+# so counting it would claim provenance the instant a firm is looked up. That
+# is not hypothetical — negative AUM growth clamps to 0.0, which is exactly the
+# slider's default, so every firm with a flat or shrinking book would have
+# tripped it.
+_SEC_FIELD_DEFAULTS = {"aum": 0, "num_clients": 0, "revenue": 0,
+                       "rev_growth_pct": 0.0}
+
+
 def _sec_expected_values(sec) -> dict:
     """What each field would hold if its SEC value were applied.
 
@@ -607,6 +617,8 @@ def _sec_is_applied() -> bool:
         current = st.session_state.get(key)
         if current is None:
             continue
+        if expected == _SEC_FIELD_DEFAULTS.get(key):
+            continue  # indistinguishable from untouched — proves nothing
         if key == "rev_growth_pct":
             try:
                 if abs(float(current) - float(expected)) < 0.05:

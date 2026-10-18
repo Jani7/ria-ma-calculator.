@@ -120,6 +120,15 @@ def _manifest_for(df: pd.DataFrame, *, gap_months: int = 12,
         "snapshot_gap_days": (current - prior).days,
         "exempt_status": exempt_status,
         "exempt_error": None,
+        # One annual filing season apart -- the shape of the real Oct 2026 run.
+        "filing_season": {
+            "paired_firms": 14_599,
+            "valid_gap_firms": 14_599,
+            "unchanged_aum_share": 0.0074,
+            "median_filing_gap_years": 1.018,
+            "blanked_firms": 336,
+            "blanked_share": 0.023,
+        },
         "source_urls": {
             "current": "https://www.sec.gov/files/investment/data/ia063026.zip",
             "prior": "https://www.sec.gov/files/investment/data/ia063025.zip",
@@ -564,46 +573,101 @@ def test_manifest_happy_path_passes_clean():
     json.dumps(report.to_dict())
 
 
-def test_manifest_24_month_gap_blocks_and_the_parquet_alone_cannot_see_it():
-    """The whole reason the sidecar exists."""
+def test_manifest_snapshot_gap_alone_no_longer_blocks():
+    """The rule that blocked the Oct 2026 refresh for nothing.
+
+    ADV AUM is restated once a year, so a 16- or 24-month snapshot gap still
+    compares two consecutive annual filings when the filing season says so.
+    The gap is now a WARN; the filing-season check is the gate."""
     df = _good_df()
-    path = _write(df, "gap24")
-
-    # Nothing inside the file moves when the prior snapshot is two years old:
-    # the same ~92% of rows carry an aum_prior_year, the totals are plausible,
-    # the dates are current. A parquet-only run cannot be expected to catch it.
-    assert validate(path).ok, "parquet-only validation was supposed to miss this"
-
-    m = _write_manifest(_manifest_for(df, gap_months=24), "gap24")
-    report = validate(path, manifest_path=m)
-    _assert_blocks(report, "manifest_snapshot_gap")
-    msg = " ".join(x for _, _, x in report.failures)
-    assert "24 months" in msg, msg
-    assert report.summary["provenance_verified"] is False
-    # The other checks must not have been collateral damage.
-    assert _failed(report) == {"manifest_snapshot_gap"}, sorted(_failed(report))
+    path = _write(df, "gap_warn")
+    for gap in (10, 14, 16, 24):
+        m = _write_manifest(_manifest_for(df, gap_months=gap), f"gap_warn_{gap}")
+        report = validate(path, manifest_path=m)
+        assert report.ok, f"a {gap}-month gap blocked on its own: {report.failures}"
+        assert "manifest_snapshot_gap" in {c for _, c, _ in report.findings}, (
+            f"a {gap}-month gap should still be flagged for a human glance"
+        )
 
 
-def test_manifest_gap_within_one_month_of_twelve_passes():
-    """SEC files are monthly and their day-of-month wanders, so a legitimate
-    pairing lands on 12 or (when the exact-12 file is absent) 13."""
+def test_manifest_gap_within_one_month_of_twelve_is_silent():
     df = _good_df()
     path = _write(df, "gap_edges")
     for gap in (11, 12, 13):
         m = _write_manifest(_manifest_for(df, gap_months=gap), f"gap_ok_{gap}")
         report = validate(path, manifest_path=m)
         assert report.ok, f"a {gap}-month gap was blocked: {report.failures}"
+        assert report.findings == [], report.findings
         assert report.summary["snapshot_gap_months"] == gap
 
 
-def test_manifest_gap_outside_the_window_blocks():
-    """Pins the tolerance at exactly +/-1: 10 and 14 are a missing monthly file,
-    not day-of-month drift, and somebody needs to look at the listing page."""
+def _season(**fs):
+    base = {"paired_firms": 14_599, "valid_gap_firms": 14_599,
+            "unchanged_aum_share": 0.0074, "median_filing_gap_years": 1.018,
+            "blanked_firms": 336, "blanked_share": 0.023}
+    base.update(fs)
+    return base
+
+
+def test_filing_season_same_season_blocks():
+    """Real numbers from pairing May 2026 with Oct 2026: both inside one filing
+    season, 94% of firms unchanged, the app would show ~0% growth for all."""
     df = _good_df()
-    path = _write(df, "gap_bad_edges")
-    for gap in (10, 14):
-        m = _write_manifest(_manifest_for(df, gap_months=gap), f"gap_bad_{gap}")
-        _assert_blocks(validate(path, manifest_path=m), "manifest_snapshot_gap")
+    path = _write(df, "fs_same")
+    payload = _manifest_for(df, filing_season=_season(
+        paired_firms=15_877, unchanged_aum_share=0.9398, median_filing_gap_years=0.0))
+    report = validate(path, manifest_path=_write_manifest(payload, "fs_same"))
+    _assert_blocks(report, "manifest_filing_season")
+    msg = " ".join(x for _, _, x in report.failures)
+    assert "same annual filing season" in msg, msg
+    assert _failed(report) == {"manifest_filing_season"}, sorted(_failed(report))
+    assert report.summary["provenance_verified"] is False
+
+
+def test_filing_season_two_seasons_apart_blocks():
+    """Two annual filings back: growth would really be two-year growth."""
+    df = _good_df()
+    path = _write(df, "fs_two")
+    payload = _manifest_for(df, gap_months=24,
+                            filing_season=_season(median_filing_gap_years=2.01))
+    _assert_blocks(validate(path, manifest_path=_write_manifest(payload, "fs_two")),
+                   "manifest_filing_season")
+
+
+def test_filing_season_edges():
+    df = _good_df()
+    path = _write(df, "fs_edges")
+    for gap_years, should_pass in ((0.74, False), (0.75, True), (1.5, True), (1.51, False)):
+        payload = _manifest_for(df, filing_season=_season(median_filing_gap_years=gap_years))
+        report = validate(path, manifest_path=_write_manifest(payload, f"fs_e_{gap_years}"))
+        assert report.ok is should_pass, (gap_years, report.failures)
+    for share, should_pass in ((0.50, True), (0.51, False)):
+        payload = _manifest_for(df, filing_season=_season(unchanged_aum_share=share))
+        report = validate(path, manifest_path=_write_manifest(payload, f"fs_u_{share}"))
+        assert report.ok is should_pass, (share, report.failures)
+
+
+def test_filing_season_warns_before_it_blocks():
+    df = _good_df()
+    path = _write(df, "fs_warn")
+    payload = _manifest_for(df, filing_season=_season(
+        unchanged_aum_share=0.30, median_filing_gap_years=1.3))
+    report = validate(path, manifest_path=_write_manifest(payload, "fs_warn"))
+    assert report.ok, report.failures
+    warned = [m for sev, c, m in report.findings if c == "manifest_filing_season"]
+    assert len(warned) == 2, report.findings
+
+
+def test_filing_season_missing_or_thin_blocks():
+    df = _good_df()
+    path = _write(df, "fs_missing")
+    for label, fs in (("null", None), ("not a dict", "yes"),
+                      ("thin pairing", _season(paired_firms=1_200)),
+                      ("null share", _season(unchanged_aum_share=None)),
+                      ("null gap", _season(median_filing_gap_years=None))):
+        payload = _manifest_for(df, filing_season=fs)
+        report = validate(path, manifest_path=_write_manifest(payload, f"fs_m_{label[:4]}"))
+        assert "manifest_filing_season" in _failed(report), (label, report.failures)
 
 
 def test_manifest_that_lies_about_its_own_gap_blocks():
@@ -615,6 +679,7 @@ def test_manifest_that_lies_about_its_own_gap_blocks():
     payload["snapshot_gap_months"] = 12          # ...but it claims 12
     report = validate(path, manifest_path=_write_manifest(payload, "gap_liar"))
     _assert_blocks(report, "manifest_snapshot_gap")
+    assert report.summary["provenance_verified"] is False
     assert "internally inconsistent" in " ".join(x for _, _, x in report.failures)
 
 
@@ -759,43 +824,145 @@ def test_builder_and_gate_agree_on_the_manifest_contract():
         ) == gap
 
 
+def _snapshots(groups):
+    """Synthetic (current, prior) snapshot frames from (n, gap_years, unchanged,
+    missing_date) groups, shaped like build_adv_data.load_snapshot output."""
+    from datetime import timedelta
+    cur_rows, pri_rows, crd = [], [], 100_000
+    base = date(2026, 3, 28)
+    for n, gap_years, unchanged, missing in groups:
+        for _ in range(n):
+            crd += 1
+            cur_date = base
+            pri_date = base - timedelta(days=int(gap_years * 365.25))
+            prior_aum = 400e6 + crd
+            cur_aum = prior_aum if unchanged else prior_aum * 1.12
+            cur_rows.append({"crd": crd, "aum": cur_aum,
+                             "as_of_date": None if missing else cur_date.isoformat()})
+            pri_rows.append({"crd": crd, "aum": prior_aum,
+                             "as_of_date": pri_date.isoformat()})
+    return pd.DataFrame(cur_rows), pd.DataFrame(pri_rows)
+
+
+def test_builder_filing_season_stats_on_a_mixed_population():
+    """The builder's own calculation, not precomputed numbers. A pairing that is
+    one season apart for most firms but zero or two for some -- odd fiscal years,
+    late filers -- must pass overall AND withhold growth for exactly the odd
+    firms, because a population median cannot vouch for each firm."""
+    import build_adv_data as B
+
+    cur, pri = _snapshots([
+        (8_000, 1.0, False, False),   # the ordinary Dec-FYE majority
+        (300, 2.0, False, False),     # two filings back
+        (150, 0.2, False, False),     # amendment shortly before annual filing
+        (120, 1.0, True, False),      # same season -- AUM identical
+        (60, 1.0, False, True),       # unusable filing date
+    ])
+    stats, blank = B.filing_season_stats(cur, pri)
+    assert stats["paired_firms"] == 8_630, stats
+    assert stats["valid_gap_firms"] == 8_570, stats
+    assert 0.95 <= stats["median_filing_gap_years"] <= 1.05, stats
+    assert stats["blanked_firms"] == 630 == len(blank), (stats, len(blank))
+    odd = set(range(108_001, 108_631))          # every non-majority firm
+    assert blank == odd, "blanked the wrong firms"
+
+    # ...and the gate accepts it, because the odd firms are withheld, not shown.
+    df = _good_df()
+    path = _write(df, "builder_mixed")
+    payload = _manifest_for(df, filing_season=stats)
+    report = validate(path, manifest_path=_write_manifest(payload, "builder_mixed"))
+    assert report.ok, report.failures
+
+
+def test_builder_filing_season_stats_catch_a_same_season_pairing():
+    import build_adv_data as B
+
+    cur, pri = _snapshots([(9_000, 0.0, True, False), (600, 1.0, False, False)])
+    stats, blank = B.filing_season_stats(cur, pri)
+    assert stats["unchanged_aum_share"] > 0.9, stats
+    assert stats["blanked_share"] > 0.9, stats
+    df = _good_df()
+    path = _write(df, "builder_same")
+    payload = _manifest_for(df, filing_season=stats)
+    _assert_blocks(validate(path, manifest_path=_write_manifest(payload, "builder_same")),
+                   "manifest_filing_season")
+
+
+def test_builder_filing_season_stats_mostly_missing_dates_blocks():
+    """Codex's case: 9,999 unusable dates and one good one must not produce a
+    confident median that passes."""
+    import build_adv_data as B
+
+    cur, pri = _snapshots([(9_999, 1.0, False, True), (1, 1.0, False, False)])
+    stats, _ = B.filing_season_stats(cur, pri)
+    assert stats["valid_gap_firms"] == 1, stats
+    df = _good_df()
+    path = _write(df, "builder_nodates")
+    payload = _manifest_for(df, filing_season=stats)
+    _assert_blocks(validate(path, manifest_path=_write_manifest(payload, "builder_nodates")),
+                   "manifest_filing_season")
+
+
+def test_valid_date_gate_stands_on_its_own():
+    """In the real builder, missing dates are also blanked, so the blanked-share
+    limit usually trips first. This pins the date gate by itself, so it cannot
+    quietly rot behind that one: a manifest claiming few usable dates must
+    block even when nothing else looks wrong."""
+    df = _good_df()
+    path = _write(df, "valid_gate")
+    payload = _manifest_for(df, filing_season=_season(valid_gap_firms=1))
+    report = validate(path, manifest_path=_write_manifest(payload, "valid_gate"))
+    _assert_blocks(report, "manifest_filing_season")
+    assert "usable filing dates" in " ".join(x for _, _, x in report.failures)
+
+
+def test_filing_season_internal_inconsistency_blocks():
+    df = _good_df()
+    path = _write(df, "fs_incons")
+    for label, fs in (
+        ("negative share", _season(unchanged_aum_share=-0.1)),
+        ("share over 1", _season(blanked_share=1.4)),
+        ("valid > paired", _season(valid_gap_firms=20_000)),
+        ("blanked > paired", _season(blanked_firms=20_000)),
+        ("count vs share", _season(blanked_firms=5_000)),
+    ):
+        report = validate(path, manifest_path=_write_manifest(
+            _manifest_for(df, filing_season=fs), f"fs_i_{label[:5]}"))
+        assert "internally inconsistent" in " ".join(x for _, _, x in report.failures), (
+            label, report.failures)
+
+
 def test_real_builder_manifest_round_trips_through_the_gate():
-    """End to end with the actual writer: build_manifest is pure and
-    write_manifest only touches the tempdir, so nothing here downloads."""
+    """End to end with the actual manifest writer and the actual stats
+    function. Nothing here downloads."""
     import build_adv_data as B
 
     df = _good_df()
     path = _write(df, "roundtrip")
     base = "https://www.sec.gov/files/investment/data/"
+    cur, pri = _snapshots([(9_000, 1.0, False, False)])
+    season, _ = B.filing_season_stats(cur, pri)
 
-    def _manifest(prior_file: str, name: str) -> Path:
-        current_url = base + "ia063026.zip"
-        prior_url = base + prior_file
-        payload = B.build_manifest(
-            out_path=path,
-            current_url=current_url,
-            prior_url=prior_url,
-            current_exempt_url=base + "ia063026-exempt.zip",
-            current_date=B.snapshot_date_from_url(current_url),
-            prior_date=B.snapshot_date_from_url(prior_url),
-            exempt_status=B.EXEMPT_INCLUDED,
-            exempt_error=None,
-            frame=df,
-        )
-        out = TMPDIR / f"{name}.manifest.json"
-        B.write_manifest(out, payload)
-        return out
-
-    ok = validate(path, manifest_path=_manifest("ia063025.zip", "rt_good"))
+    current_url = base + "ia063026.zip"
+    prior_url = base + "ia063025.zip"
+    payload = B.build_manifest(
+        out_path=path,
+        current_url=current_url,
+        prior_url=prior_url,
+        current_exempt_url=base + "ia063026-exempt.zip",
+        current_date=B.snapshot_date_from_url(current_url),
+        prior_date=B.snapshot_date_from_url(prior_url),
+        exempt_status=B.EXEMPT_INCLUDED,
+        exempt_error=None,
+        frame=df,
+        filing_season=season,
+    )
+    out = TMPDIR / "rt_good.manifest.json"
+    B.write_manifest(out, payload)
+    ok = validate(path, manifest_path=out)
     assert ok.ok, f"the real builder's manifest failed the gate: {ok.findings}"
     assert ok.summary["snapshot_gap_months"] == 12
-    assert ok.summary["snapshot_prior_date"] == "2025-06-30"
-
-    # ...and the same writer, fed a pruned listing page, gets caught.
-    _assert_blocks(
-        validate(path, manifest_path=_manifest("ia063024.zip", "rt_stale")),
-        "manifest_snapshot_gap",
-    )
+    assert ok.summary["filing_blanked_share"] == 0.0
 
 
 # ------------------------------------------------------------------------------
@@ -879,17 +1046,24 @@ def test_cli_missing_file_exits_one():
     assert "file_exists" in printed
 
 
-def test_cli_manifest_flag_gates_the_snapshot_gap():
+def test_cli_manifest_flag_gates_the_filing_season():
     """The cron job's only lever is the exit code, so the flag has to be wired
     all the way through argparse."""
     df = _good_df()
     path = _write(df, "cli_manifest")
 
-    stale = _write_manifest(_manifest_for(df, gap_months=24), "cli_manifest_stale")
-    code, printed = _run_cli(["--new", str(path), "--manifest", str(stale)])
+    same = _write_manifest(_manifest_for(df, filing_season={
+        "paired_firms": 15_877, "unchanged_aum_share": 0.9398,
+        "median_filing_gap_years": 0.0}), "cli_manifest_same")
+    code, printed = _run_cli(["--new", str(path), "--manifest", str(same)])
     assert code == 1, printed
-    assert "manifest_snapshot_gap" in printed
-    assert "24 months" in printed
+    assert "manifest_filing_season" in printed
+
+    # A long snapshot gap alone exits 0, but is visible in the log.
+    long_gap = _write_manifest(_manifest_for(df, gap_months=16), "cli_manifest_16")
+    code, printed = _run_cli(["--new", str(path), "--manifest", str(long_gap)])
+    assert code == 0, printed
+    assert "16 months" in printed
 
     good = _write_manifest(_manifest_for(df), "cli_manifest_good")
     code, printed = _run_cli(["--new", str(path), "--manifest", str(good)])

@@ -1751,8 +1751,10 @@ if "rev_growth_pct" not in st.session_state:
 # should manually enter rather than have the AUM-proxy auto-fill it.
 rev_growth_pct = st.sidebar.slider(
     "Revenue Growth Rate (%)", -10.0, _GROWTH_SLIDER_MAX, step=0.5, key="rev_growth_pct",
-    help="The pro forma applies this to revenue. SEC auto-fill uses YoY AUM "
-         "change as a proxy — it's directionally right but isn't filed revenue growth.",
+    help="The pro forma applies this to revenue. SEC auto-fill uses the change in "
+         "the firm's reported AUM across one annual Form ADV filing cycle as a "
+         "proxy — it is AUM growth (markets included), not filed revenue growth. "
+         "It's left blank for firms whose filings don't line up a year apart.",
 )
 rev_growth = rev_growth_pct / 100
 if _sec is not None and _sec.growth_rate is not None:
@@ -1763,7 +1765,7 @@ if _sec is not None and _sec.growth_rate is not None:
     elif _raw_pct < 0:
         _badge_fmt = lambda v, raw=_raw_pct: f"{raw:.1f}% YoY AUM (negative — slider clamps to 0)"
     else:
-        _badge_fmt = lambda v: f"{v:.1f}% YoY AUM (proxy)"
+        _badge_fmt = lambda v: f"{v:.1f}% AUM growth, ~1 yr (ADV filings)"
     _sec_field_badge("rev_growth_pct", _capped_pct, _badge_fmt, "Growth")
 
 pct_recurring = st.sidebar.slider("% Recurring Revenue", 0, 100, 0, 5, key="pct_recurring")
@@ -1851,7 +1853,7 @@ def _render_reconcile_dialog():
             elif raw_pct < 0:
                 sec_disp = f"{raw_pct:.1f}% YoY AUM (negative — applied as 0%)"
             else:
-                sec_disp = f"{growth_pct:.1f}% (YoY AUM proxy)"
+                sec_disp = f"{growth_pct:.1f}% (AUM growth, ~1 yr of ADV filings)"
             _row("rev_growth_pct", "Revenue Growth · AUM proxy (not filed revenue growth)",
                  f"{cur_growth:.1f}%", growth_pct, sec_disp)
 

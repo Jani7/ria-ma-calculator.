@@ -19,18 +19,22 @@ IAPD `/compilation` endpoint is a JavaScript SPA with no public bulk download
 or documented API. NASAA's site does not publish a bulk file either. If a
 bulk state-registered feed becomes available later, extend `STATE_SOURCES`.
 
-Run quarterly. ~5MB per snapshot, ~3-5MB output.
+Runs monthly via .github/workflows in ria-ma-data. ~5MB per snapshot, ~0.7MB output.
 
 Alongside the Parquet this writes a provenance sidecar,
 `adv_current.manifest.json` (override with --manifest). Nothing inside the
 Parquet records WHICH two SEC snapshots produced it, and that gap is the one
 thing the artifact cannot be audited for after the fact: `aum_prior_year` is
-rendered by the app as a year-over-year growth rate, so if the SEC prunes the
-12-15-month-old files off its listing page, `discover_snapshots` silently
-settles for a 24-month-old snapshot and every "YoY" number in the UI quietly
-becomes a two-year number. Row counts, coverage and totals all stay plausible.
-The sidecar is what makes that detectable; `validate_adv_data.py --manifest`
-is what gates on it.
+rendered by the app as a year-over-year growth rate, and whether it really is
+one year back cannot be seen from inside the Parquet.
+
+Note what "one year back" means here. Form ADV AUM is restated once a year, in
+the annual amendment due within 90 days of fiscal year end; the monthly SEC
+files repeat that number in between. So growth is honestly year-over-year when
+the two snapshots straddle exactly ONE filing season -- not when they are 12
+calendar months apart (the SEC skips months: none for Jul-Nov 2025 or Jun-Sep
+2026). The manifest records that via `filing_season_stats`, and
+`validate_adv_data.py --manifest` gates on it.
 
 Schema mapping (Form ADV Part 1A -> our columns):
     Organization CRD#       -> crd
@@ -93,7 +97,7 @@ OUT_PATH = Path(__file__).parent.parent / "data" / "adv_current.parquet"
 # --- Provenance sidecar ------------------------------------------------------
 # Bump when the manifest's own key set changes; validate_adv_data.py pins this
 # number and FAILs on anything it does not recognize, so the two move together.
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 # adv_current.parquet -> adv_current.manifest.json
 MANIFEST_SUFFIX = ".manifest.json"
 
@@ -298,6 +302,72 @@ def load_snapshot(url: str, registration_type: str) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+# Per-firm test for "these two AUM values are one annual filing apart". The
+# date is "Latest ADV Filing Date", which other-than-annual amendments also
+# move, so it is a proxy for when the AUM was measured, not the measurement
+# date itself -- hence a deliberately wide window. Erring here costs a firm its
+# growth figure (the user types one in), never shows a wrong one. On the real
+# Oct 2026 pairing this blanks 2.3% of firms.
+FIRM_FILING_GAP_MIN_YEARS = 0.5
+FIRM_FILING_GAP_MAX_YEARS = 1.75
+
+
+def filing_season_stats(
+    current: pd.DataFrame, prior: pd.DataFrame
+) -> tuple[dict, set]:
+    """Did these two snapshots straddle exactly one annual filing season?
+
+    Form ADV is not a monthly AUM feed. A firm restates its regulatory AUM
+    once a year, in the annual amendment due within 90 days of fiscal year end
+    (for most firms, by March 31), and every monthly SEC file in between just
+    repeats that number. So `aum_prior_year` is honestly year-over-year exactly
+    when the two snapshots sit on either side of ONE filing season -- however
+    many calendar months apart the snapshots themselves are. Measured on real
+    data (Oct 2026): pairing with Dec 2025 (10 months) or Jun 2025 (16 months)
+    gave median growth of 14.3% vs 14.6%, both ~1.0 year between filings.
+
+    The two ways it really goes wrong, and what each looks like here:
+      * same season: most firms' AUM is unchanged (May vs Oct 2026: 94%), and
+        the app would show ~0% growth for everyone;
+      * two seasons apart: the median time between filings is ~2 years.
+
+    A population median cannot vouch for every firm, though: fiscal years and
+    late filers differ, so a pairing that is one season apart for most firms
+    can be zero or two for some. Returns (stats, crds_to_blank) -- the CRDs
+    whose own pairing does not look like one annual filing, so the caller can
+    withhold their growth rather than label it year-over-year.
+    """
+    a = current[["crd", "aum", "as_of_date"]].merge(
+        prior[["crd", "aum", "as_of_date"]], on="crd", suffixes=("", "_p")
+    )
+    a = a[(a["aum"] > 0) & (a["aum_p"] > 0)]
+    if a.empty:
+        return {"paired_firms": 0, "valid_gap_firms": 0,
+                "unchanged_aum_share": None, "median_filing_gap_years": None,
+                "blanked_firms": 0, "blanked_share": None}, set()
+    gap = (
+        pd.to_datetime(a["as_of_date"], errors="coerce")
+        - pd.to_datetime(a["as_of_date_p"], errors="coerce")
+    ).dt.days / 365.25
+    unchanged = a["aum"] == a["aum_p"]
+    blank = (
+        unchanged
+        | gap.isna()
+        | (gap < FIRM_FILING_GAP_MIN_YEARS)
+        | (gap > FIRM_FILING_GAP_MAX_YEARS)
+    )
+    valid = gap.dropna()
+    stats = {
+        "paired_firms": int(len(a)),
+        "valid_gap_firms": int(len(valid)),
+        "unchanged_aum_share": round(float(unchanged.mean()), 4),
+        "median_filing_gap_years": round(float(valid.median()), 3) if len(valid) else None,
+        "blanked_firms": int(blank.sum()),
+        "blanked_share": round(float(blank.mean()), 4),
+    }
+    return stats, set(a.loc[blank, "crd"].dropna().astype(int).tolist())
+
+
 def manifest_path_for(out_path: Path) -> Path:
     """Default sidecar path: <out>.parquet -> <out>.manifest.json, same dir."""
     return out_path.with_name(out_path.stem + MANIFEST_SUFFIX)
@@ -314,6 +384,7 @@ def build_manifest(
     exempt_status: str,
     exempt_error: str | None,
     frame: pd.DataFrame,
+    filing_season: dict | None = None,
 ) -> dict:
     """Assemble the provenance record for one build. Pure -- no I/O."""
     gap = (
@@ -339,6 +410,10 @@ def build_manifest(
         "snapshot_gap_days": gap_days,
         "exempt_status": exempt_status,
         "exempt_error": exempt_error,
+        # Whether aum_prior_year really is one year back -- see
+        # filing_season_stats. This, not the snapshot gap, is what the
+        # validator gates on.
+        "filing_season": filing_season,
         "source_urls": {
             "current": current_url,
             "prior": prior_url,
@@ -444,9 +519,15 @@ def main() -> int:
         )
 
     sec_current = load_snapshot(current_url, registration_type="sec")
-    sec_prior = load_snapshot(prior_url, registration_type="sec")[["crd", "aum"]].rename(
+    sec_prior_full = load_snapshot(prior_url, registration_type="sec")
+    filing_season, blank_crds = filing_season_stats(sec_current, sec_prior_full)
+    print(f"  filing season: {filing_season}", file=sys.stderr)
+    sec_prior = sec_prior_full[["crd", "aum"]].rename(
         columns={"aum": "aum_prior_year"}
     )
+    # Firms whose own pairing is not one annual filing apart get no prior
+    # AUM, so the app shows no growth for them instead of a mislabelled one.
+    sec_prior = sec_prior[~sec_prior["crd"].isin(blank_crds)]
 
     sec_current = sec_current.merge(sec_prior, on="crd", how="left")
 
@@ -525,6 +606,7 @@ def main() -> int:
             exempt_status=exempt_status,
             exempt_error=exempt_error,
             frame=merged,
+            filing_season=filing_season,
         )
         write_manifest(manifest_path, manifest)
         print(

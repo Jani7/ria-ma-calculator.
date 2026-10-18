@@ -235,7 +235,7 @@ CRD_OVERLAP_WARN = 0.93
 # answering a different question than the label claims. The sidecar
 # build_adv_data.py writes is the only artifact that knows, so these checks
 # exist to make an unattended cron trip over it.
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 # SEC snapshots are monthly, so the legitimate current<->prior gap is 12 months
 # plus or minus exactly one monthly file:
 #   12  the intended pairing;
@@ -249,8 +249,42 @@ MANIFEST_SCHEMA_VERSION = 1
 # widening the tolerance a little would not weaken the check, and tightening it
 # to exactly 12 would fail legitimate months. Anything at 14+ is not "SEC was
 # a bit late", it is a hole in the listing page and must be looked at.
+#
+# CORRECTION (2026-10-18): the premise above was wrong, and it blocked the
+# Oct 2026 refresh for nothing. Form ADV AUM is restated once a year, in the
+# annual amendment, and the monthly SEC files repeat it in between. So the
+# snapshot gap is NOT the growth period: an Oct 2026 file paired with Jun 2025
+# (16 months) or Dec 2025 (10 months) compares the same two annual filings and
+# gave 14.6% vs 14.3% median growth. What decides honesty is whether the two
+# snapshots straddle exactly one filing season -- the filing-season check
+# below. The snapshot gap is kept as a WARN, because a gap far from 12 is still
+# worth a human glance, but it no longer blocks publication on its own.
 SNAPSHOT_GAP_MONTHS_TARGET = 12
 SNAPSHOT_GAP_MONTHS_TOLERANCE = 1
+
+# --- Filing season (the check that replaced the gap rule) -------------------
+# From build_adv_data.filing_season_stats, over firms present in both files:
+#   unchanged_aum_share      same season -> most AUM identical. Observed: 0.7-1%
+#                            across a real season, 94% within one season (May
+#                            vs Oct 2026). 50% sits far from both.
+#   median_filing_gap_years  ~1.0 across one season (observed 0.99 and 1.02),
+#                            ~2.0 across two. The FAIL band is wide enough for
+#                            fiscal-year-end and amendment timing, and nowhere
+#                            near either failure.
+#   paired_firms             a pairing that barely overlaps cannot certify
+#                            anything; CRD overlap is ~15K in practice.
+FILING_UNCHANGED_MAX = 0.50
+FILING_UNCHANGED_WARN = 0.15
+FILING_GAP_YEARS_MIN = 0.75
+FILING_GAP_YEARS_MAX = 1.50
+FILING_GAP_YEARS_WARN_LO = 0.85
+FILING_GAP_YEARS_WARN_HI = 1.20
+FILING_PAIRED_MIN = 5_000
+# Firms whose OWN pairing failed the per-firm test in build_adv_data (their
+# growth is blanked rather than mislabelled). Observed 2.3% on the real Oct
+# 2026 pairing; a quarter of the file means the pairing itself is wrong.
+FILING_BLANKED_MAX = 0.25
+FILING_BLANKED_WARN = 0.10
 # The manifest must describe THIS Parquet. A manifest left over from a previous
 # run, or copied from another artifact, is worse than no manifest at all: it
 # certifies a provenance the file does not have. Row count must match exactly;
@@ -269,6 +303,7 @@ MANIFEST_REQUIRED_KEYS: tuple[str, ...] = (
     "current_snapshot_date",
     "prior_snapshot_date",
     "snapshot_gap_months",
+    "filing_season",
     "exempt_status",
     "source_urls",
     "row_count",
@@ -293,6 +328,7 @@ _MANIFEST_CHECKS = frozenset(
         "manifest_readable",
         "manifest_schema",
         "manifest_snapshot_gap",
+        "manifest_filing_season",
         "manifest_matches_parquet",
     }
 )
@@ -1061,16 +1097,106 @@ def _check_manifest(
                     f"{recomputed} calendar months",
                 )
         if not lo <= gap <= hi:
-            r.fail(
+            # Informational only -- see the CORRECTION note on the constants.
+            r.warn(
                 "manifest_snapshot_gap",
                 f"the two SEC snapshots are {gap} months apart "
                 f"({payload.get('prior_snapshot_date')} -> "
-                f"{payload.get('current_snapshot_date')}), outside the "
-                f"{lo}-{hi} month window - aum_prior_year is a {gap}-month-old "
-                f"value but the app renders (aum - aum_prior_year)/aum_prior_year "
-                f"as a YEAR-over-year rate. The SEC has most likely pruned the "
-                f"12-15-month-old files off its listing page and "
-                f"discover_snapshots settled for the next one back",
+                f"{payload.get('current_snapshot_date')}), outside the usual "
+                f"{lo}-{hi}. Not blocking: ADV AUM is restated annually, so the "
+                f"filing-season check decides whether growth is year-over-year",
+            )
+
+    # -- THE check: one annual filing season between the two snapshots? ----
+    r._ran("manifest_filing_season")
+    fs = payload.get("filing_season")
+    if not isinstance(fs, dict):
+        r.fail(
+            "manifest_filing_season",
+            f"filing_season is {fs!r}; without it nothing certifies that "
+            f"aum_prior_year is one year back",
+        )
+    else:
+        paired = _as_int(fs.get("paired_firms"))
+        valid = _as_int(fs.get("valid_gap_firms"))
+        unchanged = _as_number(fs.get("unchanged_aum_share"))
+        fgap = _as_number(fs.get("median_filing_gap_years"))
+        blanked = _as_number(fs.get("blanked_share"))
+        stats["filing_paired_firms"] = paired
+        stats["filing_valid_gap_firms"] = valid
+        stats["filing_unchanged_aum_share"] = unchanged
+        stats["filing_median_gap_years"] = fgap
+        stats["filing_blanked_share"] = blanked
+        # Internal consistency first: a malformed or hand-edited stats block
+        # must not be able to certify anything.
+        blanked_n = _as_int(fs.get("blanked_firms"))
+        bad = []
+        for name, v in (("unchanged_aum_share", unchanged), ("blanked_share", blanked)):
+            if v is not None and not 0.0 <= v <= 1.0:
+                bad.append(f"{name}={v} is not a share between 0 and 1")
+        if paired is not None and valid is not None and valid > paired:
+            bad.append(f"valid_gap_firms={valid} exceeds paired_firms={paired}")
+        if paired is not None and blanked_n is not None:
+            if blanked_n > paired:
+                bad.append(f"blanked_firms={blanked_n} exceeds paired_firms={paired}")
+            elif paired and blanked is not None and abs(blanked_n / paired - blanked) > 0.001:
+                bad.append(f"blanked_firms/paired_firms={blanked_n / paired:.4f} "
+                           f"disagrees with blanked_share={blanked}")
+        if bad:
+            r.fail("manifest_filing_season",
+                   "filing_season is internally inconsistent: " + "; ".join(bad))
+        if paired is None or paired < FILING_PAIRED_MIN:
+            r.fail(
+                "manifest_filing_season",
+                f"only {paired!r} firms appear in both snapshots (need "
+                f"{FILING_PAIRED_MIN:,}+); the pairing cannot certify growth",
+            )
+        # The median is only as good as the dates behind it: 9,999 unparseable
+        # dates and one good one would otherwise produce a confident median.
+        if valid is None or valid < FILING_PAIRED_MIN:
+            r.fail(
+                "manifest_filing_season",
+                f"only {valid!r} paired firms have usable filing dates (need "
+                f"{FILING_PAIRED_MIN:,}+); the median filing gap is not evidence",
+            )
+        if blanked is None or blanked > FILING_BLANKED_MAX:
+            r.fail(
+                "manifest_filing_season",
+                f"{blanked!r} of paired firms failed the per-firm one-filing-"
+                f"apart test (max {FILING_BLANKED_MAX:.0%}); the pairing itself "
+                f"is wrong, not a few odd fiscal years",
+            )
+        elif blanked > FILING_BLANKED_WARN:
+            r.warn(
+                "manifest_filing_season",
+                f"{blanked:.1%} of firms had growth withheld (usually ~2%)",
+            )
+        if unchanged is None or unchanged > FILING_UNCHANGED_MAX:
+            r.fail(
+                "manifest_filing_season",
+                f"{unchanged!r} of paired firms report identical AUM in both "
+                f"snapshots (max {FILING_UNCHANGED_MAX:.0%}) - they sit in the "
+                f"same annual filing season, so the app would show ~0% growth "
+                f"for most firms",
+            )
+        elif unchanged > FILING_UNCHANGED_WARN:
+            r.warn(
+                "manifest_filing_season",
+                f"{unchanged:.1%} of paired firms report unchanged AUM "
+                f"(usually ~1%)",
+            )
+        if fgap is None or not FILING_GAP_YEARS_MIN <= fgap <= FILING_GAP_YEARS_MAX:
+            r.fail(
+                "manifest_filing_season",
+                f"median time between each firm's two filings is {fgap!r} "
+                f"years (allowed {FILING_GAP_YEARS_MIN}-{FILING_GAP_YEARS_MAX}) "
+                f"- growth would not be year-over-year",
+            )
+        elif not FILING_GAP_YEARS_WARN_LO <= fgap <= FILING_GAP_YEARS_WARN_HI:
+            r.warn(
+                "manifest_filing_season",
+                f"median time between filings is {fgap:.2f} years (usually "
+                f"~1.0)",
             )
 
     # -- did we publish a smaller universe than usual? --------------------

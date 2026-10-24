@@ -4,7 +4,12 @@
 
 If you discover a security vulnerability in this project, please report it responsibly.
 
-**Email:** dhruvjani7@gmail.com
+**Preferred:** use GitHub's private vulnerability reporting for this repository —
+[Report a vulnerability](https://github.com/Jani7/ria-ma-calculator./security/advisories/new).
+
+If that page is unavailable, [open an issue](https://github.com/Jani7/ria-ma-calculator./issues/new)
+asking for a private contact channel — please do not include vulnerability details
+in the public issue itself.
 
 Please include:
 - Description of the vulnerability

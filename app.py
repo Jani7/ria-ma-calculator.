@@ -1628,14 +1628,19 @@ if st.session_state.sec_data is not None:
             """,
             unsafe_allow_html=True,
         )
-        # "Report incorrect data" mailto. urllib.parse.quote handles ampersands,
-        # accents, etc. in firm names so the subject line stays well-formed.
-        _report_subject = urllib.parse.quote(
+        # "Report incorrect data" opens a prefilled GitHub issue rather than a
+        # mailto: a personal address in public source is spam-harvestable, and
+        # an invented one is squattable — whoever registers it would silently
+        # receive these reports. The issue tracker is anonymous, functional,
+        # and already tied to the public repo. urllib.parse.quote handles
+        # ampersands, accents, etc. in firm names so the title stays well-formed.
+        _report_title = urllib.parse.quote(
             f"ADV data issue: {_sec.firm_name} (CRD {_sec.crd})"
         )
         st.sidebar.markdown(
             f"<div style='font-size:0.72rem; margin: -2px 0 6px 0;'>"
-            f"<a href='mailto:dhruvjani7@gmail.com?subject={_report_subject}' "
+            f"<a href='https://github.com/Jani7/ria-ma-calculator./issues/new"
+            f"?title={_report_title}' target='_blank' "
             f"style='color:#8b94a8;'>Report incorrect data</a></div>",
             unsafe_allow_html=True,
         )

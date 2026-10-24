@@ -60,7 +60,10 @@ from pathlib import Path
 
 import pandas as pd
 
-USER_AGENT = "RIA-Dashboard/1.0 (dhruvjani7@gmail.com)"
+# SEC fair-access asks for a contact in the UA; the app's public URL serves
+# that purpose without putting a personal (or squattable invented) email in
+# public source. The +URL form is the standard bot-identification convention.
+USER_AGENT = "RIA-Dashboard/1.0 (+https://ria-ma-calc.streamlit.app)"
 
 LISTING_URL = (
     "https://www.sec.gov/data-research/sec-markets-data/"
